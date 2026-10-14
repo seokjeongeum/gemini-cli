@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as execaModule from 'execa';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   OutputFormat,
@@ -32,6 +33,14 @@ import * as ServerConfig from '@google/gemini-cli-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { ExtensionManager } from './extension-manager.js';
 import { RESUME_LATEST } from '../utils/sessionUtils.js';
+
+vi.mock('execa', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('execa')>();
+  return {
+    ...actual,
+    execa: vi.fn(actual.execa),
+  };
+});
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
@@ -787,6 +796,35 @@ describe('loadCliConfig', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  describe('worktree startup timings', () => {
+    it('finishes the Git timing phase when repository discovery fails', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.spyOn(execaModule, 'execa').mockRejectedValue(
+        new Error('not a Git repository'),
+      );
+      const phases = new Map<string, ReturnType<typeof vi.fn>>();
+      vi.spyOn(ServerConfig.startupProfiler, 'start').mockImplementation(
+        (name) => {
+          const end = vi.fn();
+          phases.set(name, end);
+          return { end };
+        },
+      );
+
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(config.getWorktreeSettings()).toBeUndefined();
+      expect(phases.get('worktree_git_toplevel')).toHaveBeenCalledOnce();
+      expect(phases.has('worktree_canonicalize_toplevel')).toBe(false);
+      expect(phases.has('worktree_linked_discovery')).toBe(false);
+      expect(phases.has('worktree_base_sha')).toBe(false);
+    });
   });
 
   describe('Model resolution', () => {

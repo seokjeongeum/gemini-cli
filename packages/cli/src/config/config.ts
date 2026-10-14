@@ -1157,15 +1157,35 @@ async function resolveWorktreeSettings(
 ): Promise<WorktreeSettings | undefined> {
   let worktreePath: string | undefined;
   try {
-    const { stdout } = await execa('git', ['rev-parse', '--show-toplevel'], {
-      cwd,
-      env: getSafeGitEnv(),
-    });
+    const gitToplevelHandle = startupProfiler.start('worktree_git_toplevel');
+    let stdout: string;
+    try {
+      ({ stdout } = await execa('git', ['rev-parse', '--show-toplevel'], {
+        cwd,
+        env: getSafeGitEnv(),
+      }));
+    } finally {
+      gitToplevelHandle?.end();
+    }
     const toplevel = stdout.trim();
-    const projectRoot = await getProjectRootForWorktree(toplevel);
+    const linkedDiscoveryHandle = startupProfiler.start(
+      'worktree_linked_discovery',
+    );
+    try {
+      const projectRoot = await getProjectRootForWorktree(toplevel);
+      const canonicalizeHandle = startupProfiler.start(
+        'worktree_canonicalize_toplevel',
+      );
 
-    if (isGeminiWorktree(toplevel, projectRoot)) {
-      worktreePath = toplevel;
+      try {
+        if (isGeminiWorktree(toplevel, projectRoot)) {
+          worktreePath = toplevel;
+        }
+      } finally {
+        canonicalizeHandle?.end();
+      }
+    } finally {
+      linkedDiscoveryHandle?.end();
     }
   } catch {
     return undefined;
@@ -1176,6 +1196,7 @@ async function resolveWorktreeSettings(
   }
 
   let worktreeBaseSha: string | undefined;
+  const baseShaHandle = startupProfiler.start('worktree_base_sha');
   try {
     const { stdout } = await execa('git', ['rev-parse', 'HEAD'], {
       cwd: worktreePath,
@@ -1186,6 +1207,8 @@ async function resolveWorktreeSettings(
     debugLogger.debug(
       `Failed to resolve worktree base SHA at ${worktreePath}: ${getErrorMessage(e)}`,
     );
+  } finally {
+    baseShaHandle?.end();
   }
 
   if (!worktreeBaseSha) {

@@ -29,6 +29,18 @@ type WarningCheck = {
   priority: WarningPriority;
 };
 
+async function timedWarningRealpath(
+  directory: string,
+  phase: 'warning_realpath_workspace' | 'warning_realpath_home',
+): Promise<string> {
+  const handle = startupProfiler.start(phase);
+  try {
+    return await fs.realpath(directory);
+  } finally {
+    handle?.end();
+  }
+}
+
 // Individual warning checks
 const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
@@ -41,8 +53,8 @@ const homeDirectoryCheck: WarningCheck = {
 
     try {
       const [workspaceRealPath, homeRealPath] = await Promise.all([
-        fs.realpath(workspaceRoot),
-        fs.realpath(osHomedir()),
+        timedWarningRealpath(workspaceRoot, 'warning_realpath_workspace'),
+        timedWarningRealpath(osHomedir(), 'warning_realpath_home'),
       ]);
 
       if (path.resolve(workspaceRealPath) === path.resolve(homeRealPath)) {
