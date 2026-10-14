@@ -14,6 +14,7 @@ import {
   type StartupWarning,
   isHeadlessMode,
   FatalUntrustedWorkspaceError,
+  startupProfiler,
 } from '@google/gemini-cli-core';
 import type { Settings } from '../config/settingsSchema.js';
 import {
@@ -23,6 +24,7 @@ import {
 
 type WarningCheck = {
   id: string;
+  phase: string;
   check: (workspaceRoot: string, settings: Settings) => Promise<string | null>;
   priority: WarningPriority;
 };
@@ -30,6 +32,7 @@ type WarningCheck = {
 // Individual warning checks
 const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
+  phase: 'home_directory_warning',
   priority: WarningPriority.Low,
   check: async (workspaceRoot: string, settings: Settings) => {
     if (settings.ui?.showHomeDirectoryWarning === false) {
@@ -62,6 +65,7 @@ const homeDirectoryCheck: WarningCheck = {
 
 const rootDirectoryCheck: WarningCheck = {
   id: 'root-directory',
+  phase: 'root_directory_warning',
   priority: WarningPriority.High,
   check: async (workspaceRoot: string, _settings: Settings) => {
     try {
@@ -83,6 +87,7 @@ const rootDirectoryCheck: WarningCheck = {
 
 const folderTrustCheck: WarningCheck = {
   id: 'folder-trust',
+  phase: 'folder_trust_warning',
   priority: WarningPriority.High,
   check: async (workspaceRoot: string, settings: Settings) => {
     if (!isFolderTrustEnabled(settings)) {
@@ -120,7 +125,10 @@ export async function getUserStartupWarnings(
 ): Promise<StartupWarning[]> {
   const results = await Promise.all(
     WARNING_CHECKS.map(async (check) => {
-      const message = await check.check(workspaceRoot, settings);
+      const handle = startupProfiler.start(check.phase);
+      const message = await check
+        .check(workspaceRoot, settings)
+        .finally(() => handle?.end());
       if (message) {
         return {
           id: check.id,
@@ -134,11 +142,16 @@ export async function getUserStartupWarnings(
   const warnings = results.filter((w): w is StartupWarning => w !== null);
 
   if (settings.ui?.showCompatibilityWarnings !== false) {
-    warnings.push(
-      ...getCompatibilityWarnings({
-        isAlternateBuffer: options?.isAlternateBuffer,
-      }),
-    );
+    const handle = startupProfiler.start('compatibility_warnings');
+    try {
+      warnings.push(
+        ...getCompatibilityWarnings({
+          isAlternateBuffer: options?.isAlternateBuffer,
+        }),
+      );
+    } finally {
+      handle?.end();
+    }
   }
 
   return warnings;

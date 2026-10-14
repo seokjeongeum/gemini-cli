@@ -16,6 +16,7 @@ import {
 import {
   getCompatibilityWarnings,
   WarningPriority,
+  startupProfiler,
 } from '@google/gemini-cli-core';
 
 // Mock os.homedir to control the home directory in tests
@@ -194,6 +195,11 @@ describe('getUserStartupWarnings', () => {
 
   describe('folder trust check', () => {
     it('should throw FatalUntrustedWorkspaceError when untrusted in headless mode', async () => {
+      const start = vi
+        .spyOn(startupProfiler, 'start')
+        .mockImplementation(() => ({
+          end: vi.fn(),
+        }));
       const { isHeadlessMode, FatalUntrustedWorkspaceError } = await import(
         '@google/gemini-cli-core'
       );
@@ -208,6 +214,14 @@ describe('getUserStartupWarnings', () => {
       await expect(
         getUserStartupWarnings({}, testRootDir),
       ).rejects.toThrowError(FatalUntrustedWorkspaceError);
+      const trustPhaseIndex = start.mock.calls.findIndex(
+        ([phase]) => phase === 'folder_trust_warning',
+      );
+      const trustPhase = start.mock.results[trustPhaseIndex];
+      expect(trustPhase.type).toBe('return');
+      if (trustPhase.type === 'return') {
+        expect(trustPhase.value?.end).toHaveBeenCalledOnce();
+      }
     });
 
     it('should not return a warning when trusted in headless mode', async () => {

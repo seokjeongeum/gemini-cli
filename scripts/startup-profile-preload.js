@@ -32,6 +32,16 @@ export const STARTUP_PHASES = new Set([
   'load_sandbox_config',
   'startup_oauth',
   'collect_startup_warnings',
+  'detect_worktree',
+  'check_folder_trust',
+  'resolve_workspace_policies',
+  'load_policies',
+  'detect_pty',
+  'construct_config',
+  'home_directory_warning',
+  'root_directory_warning',
+  'folder_trust_warning',
+  'compatibility_warnings',
 ]);
 
 const SHORT_LIVED_HELPERS = new Set(['check-build-status', 'sandbox-command']);

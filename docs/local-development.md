@@ -61,6 +61,20 @@ Google sign-in setup before rendering when browser launch is suppressed.
 `import_interactive_ui` records the dynamic UI module import after `cli_startup`
 ends; rendering and time to the first visible prompt aren't measured.
 
+Use the nested phases to inspect the first configuration pass and individual
+warning checks:
+
+- Configuration: `detect_worktree`, `check_folder_trust`,
+  `resolve_workspace_policies`, `load_policies`, `detect_pty`, and
+  `construct_config` separate Git worktree detection, folder trust, workspace
+  policy setup, policy loading, native PTY detection, and configuration
+  construction. Compare these phases with `load_partial_config` to inspect work
+  that runs before configuration is reused.
+- Warnings: `home_directory_warning`, `root_directory_warning`,
+  `folder_trust_warning`, and `compatibility_warnings` separate filesystem path
+  resolution, folder trust, and compatibility checks within
+  `collect_startup_warnings`.
+
 Profiling adds its own module loading and report-writing overhead. To compare
 launch costs on Windows, run these commands in PowerShell from the same
 checkout:
