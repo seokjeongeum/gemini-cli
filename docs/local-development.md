@@ -75,6 +75,14 @@ warning checks:
   resolution, folder trust, and compatibility checks within
   `collect_startup_warnings`.
 
+Within worktree detection, `worktree_git_toplevel` measures the first Git
+command, `worktree_canonicalize_toplevel` measures physical path resolution,
+`worktree_linked_discovery` measures the remaining linked-worktree checks, and
+`worktree_base_sha` measures the worktree's HEAD lookup when needed.
+`warning_realpath_workspace` and `warning_realpath_home` measure the actual
+shared filesystem requests inside the directory warnings. When the workspace and
+home paths are identical, only the workspace request runs.
+
 Profiling adds its own module loading and report-writing overhead. To compare
 launch costs on Windows, run these commands in PowerShell from the same
 checkout:
@@ -89,6 +97,11 @@ profiling wrapper. These wall-clock measurements include the outer npm commands.
 Running with `--version` measures the version command's launch path rather than
 authenticated interactive startup.
 
+For an interactive startup comparison, omit `--prompt` or `-p`, wait for the
+prompt, and then enter `/quit`. An empty `-p ""` argument can be removed by npm;
+the resulting headless command exits with a missing-input error. That run
+doesn't test interactive startup or model access.
+
 If no completed `cli_startup` phase appears, the summary omits the startup
 fields. This can happen with `--version`, an early exit, an interrupted
 authentication or trust prompt, or a sandboxed CLI process that the profiler
@@ -97,6 +110,36 @@ can't observe. Host process timings can still appear in the report.
 The profiler writes timing and process metadata locally. It doesn't record
 prompts, terminal output, command arguments, environment values, or phase
 details, and it doesn't enable telemetry or debugger pauses.
+
+### Inspect Windows filesystem and launch costs
+
+If a startup phase is unusually slow, run this diagnostic from PowerShell in the
+checkout. It uses Node built-ins and Git, so you don't need to install or build
+the checkout again:
+
+```powershell
+node scripts/diagnose-windows-startup.js > .gemini/startup-diagnostic.json
+```
+
+The diagnostic compares empty Node launches, the CLI's first Git worktree
+command, and six filesystem methods for the workspace and home directories.
+Filesystem timings run inside one child process to separate them from Node
+launch time. Two rounds reverse probe order to help expose order effects.
+Progress goes to stderr, and the JSON report goes to stdout.
+
+By default, each operation has a 60-second timeout, and the whole diagnostic has
+a five-minute timeout. A timeout stops the filesystem worker and retains partial
+results. Use `--samples`, `--operation-timeout-ms`, or `--total-timeout-ms` to
+adjust these settings. Check individual `status` fields for errors and timeouts;
+`complete` indicates whether all planned samples finished, not whether they
+succeeded.
+
+The report contains versions, timings, fixed method and target labels, error
+codes, and path-text comparison booleans. It omits path strings, environment
+values, and command output other than Git's version. Different path text can
+refer to the same directory on Windows. The diagnostic changes no settings and
+doesn't identify which system component caused a delay. Compare repeated runs on
+the affected machine before drawing a performance conclusion.
 
 ## Tracing
 

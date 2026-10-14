@@ -33,6 +33,10 @@ export const STARTUP_PHASES = new Set([
   'startup_oauth',
   'collect_startup_warnings',
   'detect_worktree',
+  'worktree_git_toplevel',
+  'worktree_canonicalize_toplevel',
+  'worktree_linked_discovery',
+  'worktree_base_sha',
   'check_folder_trust',
   'resolve_workspace_policies',
   'load_policies',
@@ -42,6 +46,8 @@ export const STARTUP_PHASES = new Set([
   'root_directory_warning',
   'folder_trust_warning',
   'compatibility_warnings',
+  'warning_realpath_workspace',
+  'warning_realpath_home',
 ]);
 
 const SHORT_LIVED_HELPERS = new Set(['check-build-status', 'sandbox-command']);

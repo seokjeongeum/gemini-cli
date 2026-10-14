@@ -133,7 +133,18 @@ export async function getUserStartupWarnings(
   const realpath = (directory: string): Promise<string> => {
     let result = realPaths.get(directory);
     if (!result) {
-      result = fs.realpath(directory);
+      result = (async () => {
+        const handle = startupProfiler.start(
+          directory === workspaceRoot
+            ? 'warning_realpath_workspace'
+            : 'warning_realpath_home',
+        );
+        try {
+          return await fs.realpath(directory);
+        } finally {
+          handle?.end();
+        }
+      })();
       realPaths.set(directory, result);
     }
     return result;

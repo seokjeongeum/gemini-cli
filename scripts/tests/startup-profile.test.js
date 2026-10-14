@@ -35,6 +35,31 @@ const wrapper = fileURLToPath(
 const preload = new URL('../startup-profile-preload.js', import.meta.url).href;
 
 describe('startup timing collection', () => {
+  it.each([
+    'worktree_git_toplevel',
+    'worktree_canonicalize_toplevel',
+    'worktree_linked_discovery',
+    'worktree_base_sha',
+    'warning_realpath_workspace',
+    'warning_realpath_home',
+  ])('retains the fixed nested phase %s without path details', (name) => {
+    const collector = createPhaseCollector(100);
+    collector.collect([
+      { entryType: 'mark', name: `startup:${name}:start`, startTime: 10 },
+      {
+        entryType: 'measure',
+        name,
+        startTime: 10,
+        duration: 20,
+        detail: { path: 'private workspace path' },
+      },
+    ]);
+    expect(collector.snapshot()).toEqual([
+      { name, startMs: 110, durationMs: 20 },
+    ]);
+    expect(JSON.stringify(collector.snapshot())).not.toContain('private');
+  });
+
   it('records only correlated startup phases, without performance details', () => {
     const collector = createPhaseCollector(100);
     collector.collect([

@@ -865,6 +865,33 @@ describe('loadCliConfig', () => {
       }
     });
 
+    it('finishes the Git timing phase when repository discovery fails', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.spyOn(execaModule, 'execa').mockRejectedValue(
+        new Error('not a Git repository'),
+      );
+      const phases = new Map<string, ReturnType<typeof vi.fn>>();
+      vi.spyOn(ServerConfig.startupProfiler, 'start').mockImplementation(
+        (name) => {
+          const end = vi.fn();
+          phases.set(name, end);
+          return { end };
+        },
+      );
+
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(config.getWorktreeSettings()).toBeUndefined();
+      expect(phases.get('worktree_git_toplevel')).toHaveBeenCalledOnce();
+      expect(phases.has('worktree_canonicalize_toplevel')).toBe(false);
+      expect(phases.has('worktree_linked_discovery')).toBe(false);
+      expect(phases.has('worktree_base_sha')).toBe(false);
+    });
+
     it('uses legacy worktree discovery if the physical top-level path is uncertain', async () => {
       const settings = createTestMergedSettings();
       process.argv = ['node', 'script.js'];
