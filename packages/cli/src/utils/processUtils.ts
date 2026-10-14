@@ -4,9 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { runExitCleanup } from './cleanup.js';
-import { waitForUpdateCompletion } from './handleAutoUpdate.js';
-
 /**
  * Exit code used to signal that the CLI should be relaunched.
  */
@@ -27,6 +24,9 @@ export async function relaunchApp(options?: {
 }): Promise<void> {
   if (isRelaunching) return;
   isRelaunching = true;
+  // The supervisor also imports this module. Keep application dependencies out
+  // of its startup path until the running CLI actually requests a relaunch.
+  const { waitForUpdateCompletion } = await import('./handleAutoUpdate.js');
   await waitForUpdateCompletion();
 
   if (process.send && !process.env['VITEST'] && options?.overrideAuthType) {
@@ -57,6 +57,7 @@ export async function relaunchApp(options?: {
     });
   }
 
+  const { runExitCleanup } = await import('./cleanup.js');
   await runExitCleanup();
 
   process.exit(RELAUNCH_EXIT_CODE);

@@ -614,6 +614,7 @@ export async function main() {
 
   const partialConfig = await loadCliConfig(settings.merged, sessionId, argv, {
     projectHooks: settings.workspace.settings.hooks,
+    worktreeSettings: worktreeInfo,
     skipExtensions: true,
     loadedSettings: settings,
   });
@@ -743,7 +744,8 @@ export async function main() {
     const loadConfigHandle = startupProfiler.start('load_cli_config');
     config = await loadCliConfig(settings.merged, sessionId, argv, {
       projectHooks: settings.workspace.settings.hooks,
-      worktreeSettings: worktreeInfo,
+      worktreeSettings:
+        worktreeInfo ?? partialConfig.getWorktreeSettings() ?? null,
       loadedSettings: settings,
     });
     loadConfigHandle?.end();
