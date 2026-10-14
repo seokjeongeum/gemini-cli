@@ -7,6 +7,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import * as execaModule from 'execa';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
@@ -830,8 +832,193 @@ describe('loadCliConfig', () => {
         ['rev-parse', '--show-toplevel'],
         { cwd: process.cwd(), env: expect.anything() },
       );
-      expect(projectRoot).toHaveBeenCalledTimes(1);
+      expect(projectRoot).not.toHaveBeenCalled();
     });
+
+    it('uses legacy worktree discovery if the physical top-level path is uncertain', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.mocked(fs.realpathSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error('access denied'), { code: 'EACCES' });
+      });
+      vi.spyOn(execaModule, 'execa').mockResolvedValue({
+        stdout: process.cwd(),
+      } as never);
+      const projectRoot = vi
+        .spyOn(ServerConfig, 'getProjectRootForWorktree')
+        .mockResolvedValue(process.cwd());
+      vi.spyOn(ServerConfig, 'isGeminiWorktree').mockReturnValue(false);
+
+      await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(projectRoot).toHaveBeenCalledExactlyOnceWith(process.cwd());
+    });
+
+    it('preserves a symlink into the physical Gemini worktree layout', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.mocked(fs.realpathSync).mockReturnValueOnce(
+        path.join(process.cwd(), '.gemini', 'worktrees', 'symlink-target'),
+      );
+      const git = vi
+        .spyOn(execaModule, 'execa')
+        .mockResolvedValueOnce({ stdout: process.cwd() } as never)
+        .mockResolvedValueOnce({ stdout: 'base-sha' } as never);
+      const projectRoot = vi
+        .spyOn(ServerConfig, 'getProjectRootForWorktree')
+        .mockResolvedValue(process.cwd());
+      vi.spyOn(ServerConfig, 'isGeminiWorktree').mockReturnValue(true);
+
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(config.getWorktreeSettings()?.path).toBe(process.cwd());
+      expect(projectRoot).toHaveBeenCalledTimes(1);
+      expect(git).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves literal percent escapes in Git filesystem paths', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      const toplevel = path.join(process.cwd(), 'literal%20name');
+      vi.spyOn(execaModule, 'execa').mockResolvedValue({
+        stdout: toplevel,
+      } as never);
+      const projectRoot = vi.spyOn(ServerConfig, 'getProjectRootForWorktree');
+
+      await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(fs.realpathSync).toHaveBeenCalledWith(toplevel);
+      expect(fs.realpathSync).not.toHaveBeenCalledWith(
+        path.join(process.cwd(), 'literal name'),
+      );
+      expect(projectRoot).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'GIT_DIR',
+      'GIT_WORK_TREE',
+      'GIT_COMMON_DIR',
+      'GIT_CEILING_DIRECTORIES',
+      'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+    ])('lets Git apply the %s discovery override', async (variable) => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.stubEnv(variable, '/override');
+      const git = vi
+        .spyOn(execaModule, 'execa')
+        .mockResolvedValue({ stdout: process.cwd() } as never);
+      const projectRoot = vi.spyOn(ServerConfig, 'getProjectRootForWorktree');
+
+      await loadCliConfig(settings, 'test-session', argv, {
+        skipExtensions: true,
+      });
+
+      expect(git).toHaveBeenCalledExactlyOnceWith(
+        'git',
+        ['rev-parse', '--show-toplevel'],
+        {
+          cwd: process.cwd(),
+          env: expect.objectContaining({ [variable]: '/override' }),
+        },
+      );
+      expect(projectRoot).not.toHaveBeenCalled();
+    });
+
+    it.each(['invalid nested marker', 'core.worktree redirect'])(
+      'discovers a real Gemini worktree with %s',
+      async (layout) => {
+        const actualFs =
+          await vi.importActual<typeof import('node:fs')>('node:fs');
+        const realpath = vi
+          .spyOn(fs, 'realpathSync')
+          .mockImplementation(actualFs.realpathSync);
+        Object.defineProperty(realpath, 'native', {
+          value: actualFs.realpathSync.native,
+          configurable: true,
+        });
+        const fixtureRoot = await mkdtemp(
+          path.join(os.tmpdir(), 'gemini-worktree-startup-'),
+        );
+        const gitEnv = ServerConfig.getSafeGitEnv();
+        try {
+          await execaModule.execa('git', ['init', '--quiet', fixtureRoot], {
+            env: gitEnv,
+          });
+          await execaModule.execa(
+            'git',
+            [
+              '-c',
+              'user.name=Startup test',
+              '-c',
+              'user.email=startup-test@example.invalid',
+              'commit',
+              '--quiet',
+              '--allow-empty',
+              '-m',
+              'Initial fixture commit',
+            ],
+            { cwd: fixtureRoot, env: gitEnv },
+          );
+          const worktreePath = path.join(
+            fixtureRoot,
+            '.gemini',
+            'worktrees',
+            'startup-feature',
+          );
+          await execaModule.execa(
+            'git',
+            ['worktree', 'add', '-b', 'startup-feature', worktreePath],
+            { cwd: fixtureRoot, env: gitEnv },
+          );
+          let cwd = fixtureRoot;
+          if (layout === 'invalid nested marker') {
+            cwd = path.join(worktreePath, 'src');
+            await mkdir(path.join(cwd, '.git'), { recursive: true });
+          } else {
+            await execaModule.execa(
+              'git',
+              ['config', 'core.worktree', worktreePath],
+              { cwd: fixtureRoot, env: gitEnv },
+            );
+          }
+          const settings = createTestMergedSettings();
+          process.argv = ['node', 'script.js'];
+          const argv = await parseArguments(settings);
+          const git = vi.spyOn(execaModule, 'execa');
+
+          const config = await loadCliConfig(settings, 'test-session', argv, {
+            cwd,
+            skipExtensions: true,
+          });
+
+          const worktree = config.getWorktreeSettings();
+          expect(worktree).toMatchObject({
+            name: 'startup-feature',
+            baseSha: expect.any(String),
+          });
+          expect(actualFs.realpathSync(worktree!.path)).toBe(
+            actualFs.realpathSync(worktreePath),
+          );
+          expect(git).toHaveBeenCalledWith(
+            'git',
+            ['rev-parse', '--show-toplevel'],
+            { cwd, env: expect.anything() },
+          );
+        } finally {
+          await rm(fixtureRoot, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('retains a discovered Gemini worktree without repeating Git discovery', async () => {
       const settings = createTestMergedSettings();

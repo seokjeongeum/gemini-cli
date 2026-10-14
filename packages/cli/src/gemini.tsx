@@ -63,7 +63,6 @@ import {
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
-import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
@@ -82,7 +81,6 @@ import {
   type InitializationResult,
 } from './core/initializer.js';
 import { validateAuthMethod } from './config/auth.js';
-import { runAcpClient } from './acp/acpStdioTransport.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import {
@@ -896,6 +894,7 @@ export async function main() {
     }
 
     if (config.getAcpMode()) {
+      const { runAcpClient } = await import('./acp/acpStdioTransport.js');
       return runAcpClient(config, settings, argv);
     }
 
@@ -1018,6 +1017,7 @@ export async function main() {
 
     initializeOutputListenersAndFlush(config);
 
+    const { runNonInteractive } = await import('./nonInteractiveCli.js');
     await runNonInteractive({
       config,
       settings,

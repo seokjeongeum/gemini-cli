@@ -25,7 +25,11 @@ import {
 type WarningCheck = {
   id: string;
   phase: string;
-  check: (workspaceRoot: string, settings: Settings) => Promise<string | null>;
+  check: (
+    workspaceRoot: string,
+    settings: Settings,
+    realpath: (directory: string) => Promise<string>,
+  ) => Promise<string | null>;
   priority: WarningPriority;
 };
 
@@ -34,15 +38,15 @@ const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
   phase: 'home_directory_warning',
   priority: WarningPriority.Low,
-  check: async (workspaceRoot: string, settings: Settings) => {
+  check: async (workspaceRoot, settings, realpath) => {
     if (settings.ui?.showHomeDirectoryWarning === false) {
       return null;
     }
 
     try {
       const [workspaceRealPath, homeRealPath] = await Promise.all([
-        fs.realpath(workspaceRoot),
-        fs.realpath(osHomedir()),
+        realpath(workspaceRoot),
+        realpath(osHomedir()),
       ]);
 
       if (path.resolve(workspaceRealPath) === path.resolve(homeRealPath)) {
@@ -67,9 +71,9 @@ const rootDirectoryCheck: WarningCheck = {
   id: 'root-directory',
   phase: 'root_directory_warning',
   priority: WarningPriority.High,
-  check: async (workspaceRoot: string, _settings: Settings) => {
+  check: async (workspaceRoot, _settings, realpath) => {
     try {
-      const workspaceRealPath = await fs.realpath(workspaceRoot);
+      const workspaceRealPath = await realpath(workspaceRoot);
       const errorMessage =
         'Warning: You are running Gemini CLI in the root directory. Your entire folder structure will be used for context. It is strongly recommended to run in a project-specific directory.';
 
@@ -123,11 +127,22 @@ export async function getUserStartupWarnings(
   workspaceRoot: string = process.cwd(),
   options?: { isAlternateBuffer?: boolean },
 ): Promise<StartupWarning[]> {
+  // Directory checks share the same canonical paths during this invocation.
+  // Avoid repeating filesystem work without retaining paths between startups.
+  const realPaths = new Map<string, Promise<string>>();
+  const realpath = (directory: string): Promise<string> => {
+    let result = realPaths.get(directory);
+    if (!result) {
+      result = fs.realpath(directory);
+      realPaths.set(directory, result);
+    }
+    return result;
+  };
   const results = await Promise.all(
     WARNING_CHECKS.map(async (check) => {
       const handle = startupProfiler.start(check.phase);
       const message = await check
-        .check(workspaceRoot, settings)
+        .check(workspaceRoot, settings, realpath)
         .finally(() => handle?.end());
       if (message) {
         return {

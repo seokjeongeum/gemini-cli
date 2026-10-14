@@ -74,6 +74,11 @@ vi.mock('./nonInteractiveCli.js', () => ({
   runNonInteractive: runNonInteractiveSpy,
 }));
 
+const runAcpClientSpy = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('./acp/acpStdioTransport.js', () => ({
+  runAcpClient: runAcpClientSpy,
+}));
+
 const liteRtStartupMocks = vi.hoisted(() => ({
   imported: vi.fn(),
   ensureRunning: vi.fn().mockResolvedValue(undefined),
@@ -1108,6 +1113,36 @@ describe('gemini.tsx main function kitty protocol', () => {
     );
     expect(processExitSpy).toHaveBeenCalledWith(0); // Should not exit on cleanup failure
     processExitSpy.mockRestore();
+  });
+
+  it('routes ACP requests to the transport without consuming headless input', async () => {
+    vi.stubEnv('SANDBOX', 'true');
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    const settings = createMockSettings({
+      merged: {
+        security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+      },
+    });
+    const config = createMockConfig({
+      getAcpMode: vi.fn(() => true),
+      isInteractive: vi.fn(() => false),
+      getQuestion: vi.fn(() => ''),
+    });
+    const argv = { acp: true } as CliArgs;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(config);
+    vi.mocked(parseArguments).mockResolvedValue(argv);
+    const readStdinSpy = vi.spyOn(readStdinModule, 'readStdin');
+
+    await main();
+
+    expect(runAcpClientSpy).toHaveBeenCalledExactlyOnceWith(
+      config,
+      settings,
+      argv,
+    );
+    expect(runNonInteractive).not.toHaveBeenCalled();
+    expect(readStdinSpy).not.toHaveBeenCalled();
   });
 
   it('should read from stdin in non-interactive mode', async () => {
