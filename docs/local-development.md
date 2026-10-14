@@ -27,9 +27,10 @@ npm run start:profile -- --model auto
 Test normally, then use `/quit` to exit. The profiler prints the output
 directory when it starts and a timing summary when Gemini CLI exits. Each run
 writes `summary.json` and `process-<pid>.json` files in a separate, ignored
-directory under `.gemini/startup-profiles/`. Process files update during the
-session. Set `GEMINI_STARTUP_PROFILE_DIR` to save runs under a different
-directory.
+directory under `.gemini/startup-profiles/`. CLI process snapshots are written
+after `cli_startup` and the observed startup phases finish. If startup exits
+early, the profiler saves any completed phases on exit. Set
+`GEMINI_STARTUP_PROFILE_DIR` to save runs under a different directory.
 
 Use the summary fields to compare runs with the same settings and arguments:
 
@@ -40,11 +41,38 @@ Use the summary fields to compare runs with the same settings and arguments:
   existing `cli_startup` phase ends. This boundary precedes UI rendering; it
   doesn't measure time to the first visible prompt.
 
+For `check-build-status` and `sandbox-command`, optional `helperDurationMs`
+measures Node process startup through its exit callback, before writing the
+profile. It includes Node and preload startup but excludes profile file writes
+and renames; it isn't an exact timing of the helper's function.
+
 The report lists process starts and named startup phases, including
 authentication when that phase runs. Phases can overlap or contain other phases,
-so don't add their durations to calculate total startup time. The profile
-excludes initialization of the outer `npm run start:profile` command. Running
-with `--version` measures the version command's launch path rather than
+so don't add their durations to calculate total startup time. Named phases don't
+cover every operation: gaps can include uninstrumented work, process launches,
+and module loading. The profile excludes initialization of the outer
+`npm run start:profile` command.
+
+For work inside `main()`, check `load_partial_config`, `initial_auth`, and
+`load_sandbox_config` before the full configuration and app initialization
+phases. Check `read_startup_warnings`, `collect_startup_warnings`, and
+`resolve_session` for warnings and session resolution. `startup_oauth` records
+Google sign-in setup before rendering when browser launch is suppressed.
+`import_interactive_ui` records the dynamic UI module import after `cli_startup`
+ends; rendering and time to the first visible prompt aren't measured.
+
+Profiling adds its own module loading and report-writing overhead. To compare
+launch costs on Windows, run these commands in PowerShell from the same
+checkout:
+
+```powershell
+Measure-Command { npm start -- --version | Out-Host }
+Measure-Command { npm run start:profile -- --version | Out-Host }
+```
+
+Repeat both commands with the same environment to estimate the extra cost of the
+profiling wrapper. These wall-clock measurements include the outer npm commands.
+Running with `--version` measures the version command's launch path rather than
 authenticated interactive startup.
 
 If no completed `cli_startup` phase appears, the summary omits the startup

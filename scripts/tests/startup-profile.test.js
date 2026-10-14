@@ -144,6 +144,34 @@ describe('startup timing collection', () => {
     ).not.toHaveProperty('cliStartupEndMs');
   });
 
+  it('retains durations only for short-lived startup helpers', () => {
+    const profiles = [
+      'npm',
+      'start',
+      'cli',
+      'check-build-status',
+      'sandbox-command',
+    ].map((entrypoint, index) => ({
+      schemaVersion: 1,
+      pid: index + 2,
+      ppid: 1,
+      entrypoint,
+      processStartMs: index,
+      helperDurationMs: 20,
+      sessionDurationMs: 100000,
+      phases: [],
+    }));
+    const summary = summarizeProfiles(profiles);
+    for (const profile of summary.processes.slice(0, 3)) {
+      expect(profile).not.toHaveProperty('helperDurationMs');
+      expect(profile).not.toHaveProperty('sessionDurationMs');
+    }
+    for (const profile of summary.processes.slice(3)) {
+      expect(profile.helperDurationMs).toBe(20);
+    }
+    expect(summary).not.toHaveProperty('cliStartupEndMs');
+  });
+
   it('skips damaged records while retaining healthy process timings', () => {
     expect(
       summarizeProfiles([
@@ -245,8 +273,14 @@ describe('npm start profiling wrapper', () => {
     const summary = JSON.parse(
       readFileSync(join(directory, 'summary.json'), 'utf8'),
     );
-    expect(summary.processes[0].phases[0].startMs).toBeGreaterThan(0);
-    expect(summary.processes[0].phases[0].name).toBe('cli_startup');
+    // npm is a launcher, so its unrelated performance marks are not observed.
+    expect(summary.processes[0].phases).toEqual([]);
+    // A complete embedded module can exceed cmd.exe's inherited-variable limit.
+    // Leave room for existing NODE_OPTIONS by appending only the small loader.
+    expect(
+      forwarded.options.length - process.env.NODE_OPTIONS.length,
+    ).toBeLessThan(2048);
+    expect(forwarded.options).toContain('file');
     expect(summary).not.toHaveProperty('cliStartupEndMs');
   });
 
@@ -366,28 +400,37 @@ describe('npm start profiling wrapper', () => {
         : 'profile "quoted" directory #',
     );
     const scripts = join(fixture, 'scripts');
+    const cli = join(fixture, 'packages', 'cli', 'dist', 'index.js');
     const directory = join(fixture, 'reports');
     mkdirSync(scripts, { recursive: true });
+    mkdirSync(join(fixture, 'packages', 'cli', 'dist'), { recursive: true });
     mkdirSync(directory);
     writeFileSync(join(fixture, 'package.json'), '{"type":"module"}');
-    for (const name of ['startup-profile-preload.js', 'startup-profile.js']) {
-      copyFileSync(join(projectRoot, 'scripts', name), join(scripts, name));
-    }
-    fakeNpm(`
-      const { performance } = require('node:perf_hooks');
-      performance.mark('startup:load_settings:start');
+    // The preload works with only this file; it imports no other checkout files.
+    copyFileSync(
+      join(projectRoot, 'scripts', 'startup-profile-preload.js'),
+      join(scripts, 'startup-profile-preload.js'),
+    );
+    writeFileSync(
+      cli,
+      `
+      import { performance } from 'node:perf_hooks';
+      performance.mark('startup:load_settings:start', { detail: 'private prompt' });
       performance.mark('startup:load_settings:end');
       performance.measure('load_settings', 'startup:load_settings:start', 'startup:load_settings:end');
       process.exit(17);
-    `);
-    const result = spawnSync(process.execPath, [npmEntrypoint], {
+    `,
+    );
+    const result = spawnSync(process.execPath, [cli], {
       env: {
         ...process.env,
         NODE_OPTIONS: getPreloadOption(
           pathToFileURL(join(scripts, 'startup-profile-preload.js')).href,
         ),
         GEMINI_STARTUP_PROFILE_RUN_DIR: directory,
+        GEMINI_STARTUP_PROFILE_ROOT: fixture,
         GEMINI_STARTUP_PROFILE_LAUNCH_TIME: String(Date.now()),
+        GEMINI_CLI_NO_RELAUNCH: 'true',
       },
     });
     expect(result.status).toBe(17);
@@ -397,6 +440,87 @@ describe('npm start profiling wrapper', () => {
     );
     expect(record.phases[0].name).toBe('load_settings');
     expect(record.phases[0].startMs).toBeGreaterThan(0);
+    expect(JSON.stringify(record)).not.toContain('private');
+  });
+
+  it('measures helper work without observing marks or storing command data', () => {
+    const fixture = join(temporary, 'helper-preload');
+    const scripts = join(fixture, 'scripts');
+    const directory = join(fixture, 'reports');
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(directory);
+    writeFileSync(join(fixture, 'package.json'), '{"type":"module"}');
+    const helper = join(scripts, 'sandbox_command.js');
+    writeFileSync(
+      helper,
+      `
+      import { performance } from 'node:perf_hooks';
+      performance.mark('startup:load_settings:start', { detail: 'private prompt' });
+      performance.mark('startup:load_settings:end');
+      performance.measure('load_settings', 'startup:load_settings:start', 'startup:load_settings:end');
+      setTimeout(() => process.exit(19), 20);
+    `,
+    );
+    const result = spawnSync(process.execPath, [helper, 'private argument'], {
+      env: {
+        ...process.env,
+        NODE_OPTIONS: getPreloadOption(preload),
+        GEMINI_STARTUP_PROFILE_ROOT: fixture,
+        GEMINI_STARTUP_PROFILE_RUN_DIR: directory,
+        GEMINI_STARTUP_PROFILE_LAUNCH_TIME: String(Date.now()),
+      },
+    });
+    expect(result.status).toBe(19);
+    const record = JSON.parse(
+      readFileSync(join(directory, readdirSync(directory)[0]), 'utf8'),
+    );
+    expect(record.entrypoint).toBe('sandbox-command');
+    expect(record.helperDurationMs).toBeGreaterThanOrEqual(20);
+    expect(record.phases).toEqual([]);
+    expect(JSON.stringify(record)).not.toContain('private');
+    expect(record).not.toHaveProperty('sessionDurationMs');
+  });
+
+  it('buffers completed phases until initialization finishes and flushes failures on exit', () => {
+    const fixture = join(temporary, 'buffered-cli');
+    const cli = join(fixture, 'packages', 'cli', 'dist', 'index.js');
+    const directory = join(fixture, 'reports');
+    mkdirSync(join(fixture, 'packages', 'cli', 'dist'), { recursive: true });
+    mkdirSync(directory);
+    writeFileSync(join(fixture, 'package.json'), '{"type":"module"}');
+    writeFileSync(
+      cli,
+      `
+      import { readdirSync } from 'node:fs';
+      import { performance } from 'node:perf_hooks';
+      performance.mark('startup:cli_startup:start');
+      performance.mark('startup:load_settings:start');
+      performance.mark('startup:load_settings:end');
+      performance.measure('load_settings', 'startup:load_settings:start', 'startup:load_settings:end');
+      setTimeout(() => {
+        console.log(readdirSync(process.env.GEMINI_STARTUP_PROFILE_RUN_DIR).length);
+        process.exit(23);
+      }, 200);
+    `,
+    );
+    const result = spawnSync(process.execPath, [cli], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_OPTIONS: getPreloadOption(preload),
+        GEMINI_STARTUP_PROFILE_ROOT: fixture,
+        GEMINI_STARTUP_PROFILE_RUN_DIR: directory,
+        GEMINI_STARTUP_PROFILE_LAUNCH_TIME: String(Date.now()),
+        GEMINI_CLI_NO_RELAUNCH: 'true',
+      },
+    });
+    expect(result.status).toBe(23);
+    expect(result.stdout.trim()).toBe('0');
+    const record = JSON.parse(
+      readFileSync(join(directory, readdirSync(directory)[0]), 'utf8'),
+    );
+    expect(record.phases.map((phase) => phase.name)).toEqual(['load_settings']);
+    expect(summarizeProfiles([record])).not.toHaveProperty('cliStartupEndMs');
   });
 
   it('does not record unrelated Node tools or worker threads', async () => {

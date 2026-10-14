@@ -59,12 +59,15 @@ export async function runStartupProfile({
     mkdirSync(parent, { recursive: true, mode: 0o700 });
     const prefix = new Date().toISOString().replace(/[:.]/g, '-');
     directory = mkdtempSync(join(parent, `${prefix}-`));
+    // Keep NODE_OPTIONS compact for npm's Windows command shell. The preload
+    // is a single checkout module with only Node builtin dependencies.
     const option = getPreloadOption(
       new URL('./startup-profile-preload.js', import.meta.url).href,
     );
     launchEnv = {
       ...env,
       NODE_OPTIONS: [env['NODE_OPTIONS'], option].filter(Boolean).join(' '),
+      GEMINI_STARTUP_PROFILE_ROOT: root,
       GEMINI_STARTUP_PROFILE_RUN_DIR: directory,
       GEMINI_STARTUP_PROFILE_LAUNCH_TIME: String(Date.now()),
     };
