@@ -452,7 +452,10 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
 ) {
   // Dynamically import the heavy UI module so React/Ink are only parsed when needed
-  const { startInteractiveUI: doStartUI } = await import('./interactiveCli.js');
+  const importUiHandle = startupProfiler.start('import_interactive_ui');
+  const { startInteractiveUI: doStartUI } = await import(
+    './interactiveCli.js'
+  ).finally(() => importUiHandle?.end());
   await doStartUI(
     config,
     settings,
@@ -522,7 +525,10 @@ export async function main() {
     parseArgsHandle?.end();
   });
 
-  const rawStartupWarningsPromise = getStartupWarnings();
+  const readWarningsHandle = startupProfiler.start('read_startup_warnings');
+  const rawStartupWarningsPromise = getStartupWarnings().finally(() =>
+    readWarningsHandle?.end(),
+  );
 
   // Report settings errors once during startup
   settings.errors.forEach((error) => {
@@ -539,11 +545,12 @@ export async function main() {
 
   const argv = await argvPromise;
 
+  const resolveSessionHandle = startupProfiler.start('resolve_session');
   const { sessionId, resumedSessionData } = await resolveSessionId(
     argv.resume,
     argv.sessionId,
     argv.sessionFile,
-  );
+  ).finally(() => resolveSessionHandle?.end());
 
   if (
     (argv.allowedTools && argv.allowedTools.length > 0) ||
@@ -612,12 +619,13 @@ export async function main() {
     }
   }
 
+  const partialConfigHandle = startupProfiler.start('load_partial_config');
   const partialConfig = await loadCliConfig(settings.merged, sessionId, argv, {
     projectHooks: settings.workspace.settings.hooks,
     worktreeSettings: worktreeInfo,
     skipExtensions: true,
     loadedSettings: settings,
-  });
+  }).finally(() => partialConfigHandle?.end());
 
   adminControlsListner.setConfig(partialConfig);
 
@@ -626,6 +634,7 @@ export async function main() {
   // redirect.
   let initialAuthFailed = false;
   if (!settings.merged.security.auth.useExternal && !argv.isCommand) {
+    const initialAuthHandle = startupProfiler.start('initial_auth');
     try {
       if (
         partialConfig.isInteractive() &&
@@ -664,6 +673,8 @@ export async function main() {
         debugLogger.error('Error authenticating:', err);
         initialAuthFailed = true;
       }
+    } finally {
+      initialAuthHandle?.end();
     }
   }
 
@@ -687,7 +698,9 @@ export async function main() {
     const memoryArgs = settings.merged.advanced.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
+    const sandboxConfigHandle = startupProfiler.start('load_sandbox_config');
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    sandboxConfigHandle?.end();
     // We intentionally omit the list of extensions here because extensions
     // should not impact auth or setting up the sandbox.
     // TODO(jacobr): refactor loadCliConfig so there is a minimal version
@@ -875,7 +888,11 @@ export async function main() {
       config.isBrowserLaunchSuppressed()
     ) {
       // Do oauth before app renders to make copying the link possible.
-      await getOauthClient(settings.merged.security.auth.selectedType, config);
+      const startupOauthHandle = startupProfiler.start('startup_oauth');
+      await getOauthClient(
+        settings.merged.security.auth.selectedType,
+        config,
+      ).finally(() => startupOauthHandle?.end());
     }
 
     if (config.getAcpMode()) {
@@ -886,6 +903,9 @@ export async function main() {
     const useAlternateBuffer = shouldEnterAlternateScreen(
       config.getUseAlternateBuffer(),
       config.getScreenReader(),
+    );
+    const collectWarningsHandle = startupProfiler.start(
+      'collect_startup_warnings',
     );
     const rawStartupWarnings = await rawStartupWarningsPromise;
     const startupWarnings: StartupWarning[] = [
@@ -898,6 +918,7 @@ export async function main() {
         isAlternateBuffer: useAlternateBuffer,
       })),
     ];
+    collectWarningsHandle?.end();
 
     cliStartupHandle?.end();
 
