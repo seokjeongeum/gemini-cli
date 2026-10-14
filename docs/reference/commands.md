@@ -167,7 +167,9 @@ Slash commands provide meta-level control over the CLI itself.
 
 ### `/editor`
 
-- **Description:** Open a dialog for selecting supported editors.
+Open a dialog for selecting supported editors. Gemini CLI checks which editors
+are installed when you first open the dialog and reuses the list for the rest of
+the session.
 
 ### `/extensions`
 

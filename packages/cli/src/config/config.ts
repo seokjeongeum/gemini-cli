@@ -575,7 +575,8 @@ export interface LoadCliConfigOptions {
   projectHooks?: { [K in HookEventName]?: HookDefinition[] } & {
     disabled?: string[];
   };
-  worktreeSettings?: WorktreeSettings;
+  // Undefined discovers the worktree; null reuses a known non-worktree result.
+  worktreeSettings?: WorktreeSettings | null;
   skipExtensions?: boolean;
   loadedSettings?: LoadedSettings;
 }
@@ -595,7 +596,9 @@ export async function loadCliConfig(
   const debugMode = isDebugMode(argv);
 
   const worktreeSettings =
-    options.worktreeSettings ?? (await resolveWorktreeSettings(cwd));
+    options.worktreeSettings === undefined
+      ? await resolveWorktreeSettings(cwd)
+      : (options.worktreeSettings ?? undefined);
 
   if (argv.sandbox) {
     process.env['GEMINI_SANDBOX'] = 'true';

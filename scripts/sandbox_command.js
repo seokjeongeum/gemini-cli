@@ -25,7 +25,9 @@ import os from 'node:os';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import dotenv from 'dotenv';
-import { GEMINI_DIR } from '@google/gemini-cli-core';
+// This helper only needs the directory name. Avoid loading the full core package
+// before the CLI starts.
+import { GEMINI_DIR } from '@google/gemini-cli-core/dist/src/utils/paths.js';
 
 const argv = yargs(hideBin(process.argv)).option('q', {
   alias: 'quiet',

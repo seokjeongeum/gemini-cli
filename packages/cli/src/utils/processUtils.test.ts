@@ -32,12 +32,49 @@ describe('processUtils', () => {
     _resetRelaunchStateForTesting();
   });
 
-  afterEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   it('should wait for updates, run cleanup, and exit with the relaunch code', async () => {
     await relaunchApp();
     expect(handleAutoUpdate.waitForUpdateCompletion).toHaveBeenCalledTimes(1);
     expect(runExitCleanup).toHaveBeenCalledTimes(1);
+    expect(processExit).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+  });
+
+  it('waits for updates and cleanup before exiting, and ignores concurrent relaunches', async () => {
+    let finishUpdate!: () => void;
+    let finishCleanup!: () => void;
+    const update = new Promise<void>((resolve) => {
+      finishUpdate = resolve;
+    });
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    vi.mocked(handleAutoUpdate.waitForUpdateCompletion).mockReturnValueOnce(
+      update,
+    );
+    runExitCleanup.mockReturnValueOnce(cleanup);
+
+    const relaunch = relaunchApp();
+    await vi.waitFor(() => {
+      expect(handleAutoUpdate.waitForUpdateCompletion).toHaveBeenCalledTimes(1);
+    });
+    await relaunchApp();
+    expect(runExitCleanup).not.toHaveBeenCalled();
+    expect(processExit).not.toHaveBeenCalled();
+
+    finishUpdate();
+    await vi.waitFor(() => {
+      expect(runExitCleanup).toHaveBeenCalledTimes(1);
+    });
+    expect(processExit).not.toHaveBeenCalled();
+
+    finishCleanup();
+    await relaunch;
+    expect(processExit).toHaveBeenCalledOnce();
     expect(processExit).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
   });
 
@@ -87,6 +124,9 @@ describe('processUtils', () => {
     try {
       const relaunchPromise = relaunchApp({
         overrideAuthType: 'login_with_google',
+      });
+      await vi.waitFor(() => {
+        expect(sendMock).toHaveBeenCalled();
       });
       await vi.advanceTimersByTimeAsync(500);
       await relaunchPromise;

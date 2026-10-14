@@ -25,6 +25,7 @@ import {
 import {
   loadCliConfig,
   parseArguments,
+  getRequestedWorktreeName,
   type CliArgs,
 } from './config/config.js';
 import { loadSandboxConfig } from './config/sandboxConfig.js';
@@ -50,11 +51,13 @@ import {
   coreEvents,
   AuthType,
   ExitCodes,
+  type WorktreeSettings,
 } from '@google/gemini-cli-core';
 import { act } from 'react';
 import { type InitializationResult } from './core/initializer.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { SessionSelector, SessionError } from './utils/sessionUtils.js';
+import { setupWorktree } from './utils/worktreeSetup.js';
 
 // Hoisted constants and mocks
 const performance = vi.hoisted(() => ({
@@ -207,6 +210,10 @@ vi.mock('./config/config.js', () => ({
   isDebugMode: vi.fn(() => false),
   getRequestedWorktreeName: vi.fn(() => undefined),
   getWorktreeArg: vi.fn(() => undefined),
+}));
+
+vi.mock('./utils/worktreeSetup.js', () => ({
+  setupWorktree: vi.fn(),
 }));
 
 vi.mock('read-package-up', () => ({
@@ -1518,6 +1525,7 @@ describe('project hooks loading based on trust', () => {
   let parseArguments: Mock;
 
   beforeEach(async () => {
+    vi.stubEnv('GEMINI_CLI_TRUST_WORKSPACE', 'true');
     // Dynamically import and get the mocked functions
     const configModule = await import('./config/config.js');
     loadCliConfig = vi.mocked(configModule.loadCliConfig);
@@ -1533,6 +1541,8 @@ describe('project hooks loading based on trust', () => {
     loadSettings = vi.mocked(settingsModule.loadSettings);
 
     vi.clearAllMocks();
+    vi.mocked(getRequestedWorktreeName).mockReturnValue(undefined);
+    vi.mocked(setupWorktree).mockReset();
     // Mock the main function's dependencies to isolate the config loading part
     vi.mock('./nonInteractiveCli.js', () => ({
       runNonInteractive: vi.fn().mockResolvedValue(undefined),
@@ -1551,7 +1561,91 @@ describe('project hooks loading based on trust', () => {
   });
 
   afterEach(() => {
+    vi.mocked(getRequestedWorktreeName).mockReturnValue(undefined);
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    undefined,
+    {
+      name: 'existing-feature',
+      path: '/project/.gemini/worktrees/existing-feature',
+      baseSha: 'existing-base-sha',
+    },
+  ])(
+    'reuses the initial worktree discovery result %j',
+    async (worktreeSettings) => {
+      const partialConfig = createMockConfig({
+        getWorktreeSettings: vi.fn(() => worktreeSettings),
+      });
+      const fullConfig = createMockConfig({
+        getQuestion: vi.fn(() => 'test question'),
+      });
+      loadCliConfig
+        .mockResolvedValueOnce(partialConfig)
+        .mockResolvedValueOnce(fullConfig);
+      loadSettings.mockReturnValue(
+        createMockSettings({
+          merged: {
+            security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+          },
+        }),
+      );
+
+      await main();
+
+      expect(loadCliConfig).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          worktreeSettings: worktreeSettings ?? null,
+        }),
+      );
+      expect(partialConfig.refreshAuth).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('preserves an explicitly requested worktree in both startup configurations', async () => {
+    const requestedWorktree: WorktreeSettings = {
+      name: 'requested-feature',
+      path: '/project/.gemini/worktrees/requested-feature',
+      baseSha: 'requested-base-sha',
+    };
+    vi.mocked(getRequestedWorktreeName).mockReturnValue('requested-feature');
+    vi.mocked(setupWorktree).mockResolvedValue(requestedWorktree);
+    const partialConfig = createMockConfig({
+      getWorktreeSettings: vi.fn(() => ({
+        name: 'detected-feature',
+        path: '/project/.gemini/worktrees/detected-feature',
+        baseSha: 'detected-base-sha',
+      })),
+    });
+    loadCliConfig
+      .mockResolvedValueOnce(partialConfig)
+      .mockResolvedValueOnce(
+        createMockConfig({ getQuestion: vi.fn(() => 'test question') }),
+      );
+    loadSettings.mockReturnValue(
+      createMockSettings({
+        merged: {
+          security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+        },
+      }),
+    );
+
+    await main();
+
+    expect(setupWorktree).toHaveBeenCalledExactlyOnceWith('requested-feature');
+    expect(loadCliConfig).toHaveBeenCalledTimes(2);
+    for (const call of loadCliConfig.mock.calls) {
+      expect(call[3]).toEqual(
+        expect.objectContaining({ worktreeSettings: requestedWorktree }),
+      );
+    }
+    expect(partialConfig.refreshAuth).toHaveBeenCalledTimes(1);
   });
 
   it('should load project hooks when workspace is trusted', async () => {

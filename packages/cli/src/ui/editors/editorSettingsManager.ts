@@ -18,9 +18,15 @@ export interface EditorDisplay {
 }
 
 class EditorSettingsManager {
-  private readonly availableEditors: EditorDisplay[];
+  private availableEditors: EditorDisplay[] | undefined;
 
-  constructor() {
+  getAvailableEditorDisplays(): EditorDisplay[] {
+    if (this.availableEditors) {
+      return this.availableEditors;
+    }
+
+    // Probe editor commands only when the editor dialog is opened. On Windows,
+    // each availability check starts where.exe and can delay UI module loading.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     const editorTypes = Object.keys(
       EDITOR_DISPLAY_NAMES,
@@ -47,9 +53,6 @@ class EditorSettingsManager {
         };
       }),
     ];
-  }
-
-  getAvailableEditorDisplays(): EditorDisplay[] {
     return this.availableEditors;
   }
 }
