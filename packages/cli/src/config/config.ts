@@ -42,6 +42,7 @@ import {
   getProjectRootForWorktree,
   isGeminiWorktree,
   getSafeGitEnv,
+  startupProfiler,
   type WorktreeSettings,
   type HookDefinition,
   type HookEventName,
@@ -595,10 +596,12 @@ export async function loadCliConfig(
   } = options;
   const debugMode = isDebugMode(argv);
 
+  const worktreeHandle = startupProfiler.start('detect_worktree');
   const worktreeSettings =
     options.worktreeSettings === undefined
       ? await resolveWorktreeSettings(cwd)
       : (options.worktreeSettings ?? undefined);
+  worktreeHandle?.end();
 
   if (argv.sandbox) {
     process.env['GEMINI_SANDBOX'] = 'true';
@@ -608,6 +611,7 @@ export async function loadCliConfig(
 
   const ideMode = settings.ide?.enabled ?? false;
 
+  const folderTrustHandle = startupProfiler.start('check_folder_trust');
   const folderTrust =
     process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true' ||
     process.env['VITEST'] === 'true'
@@ -618,6 +622,7 @@ export async function loadCliConfig(
       prompt: argv.prompt,
       query: argv.query,
     })?.isTrusted ?? false;
+  folderTrustHandle?.end();
 
   // Set the context filename in the server's memory file helpers before loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -828,19 +833,25 @@ export async function loadCliConfig(
     ),
   };
 
+  const workspacePoliciesHandle = startupProfiler.start(
+    'resolve_workspace_policies',
+  );
   const { workspacePoliciesDir, policyUpdateConfirmationRequest } =
     await resolveWorkspacePolicyState({
       cwd,
       trustedFolder,
       interactive,
     });
+  workspacePoliciesHandle?.end();
 
+  const policiesHandle = startupProfiler.start('load_policies');
   const policyEngineConfig = await createPolicyEngineConfig(
     effectiveSettings,
     approvalMode,
     workspacePoliciesDir,
     interactive,
   );
+  policiesHandle?.end();
 
   const defaultModel = GEMINI_MODEL_ALIAS_AUTO;
   const rawModel =
@@ -876,7 +887,9 @@ export async function loadCliConfig(
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
 
+  const ptyHandle = startupProfiler.start('detect_pty');
   const ptyInfo = await getPty();
+  ptyHandle?.end();
 
   const mcpEnabled = settings.admin?.mcp?.enabled ?? true;
   const extensionsEnabled = settings.admin?.extensions?.enabled ?? true;
@@ -959,7 +972,8 @@ export async function loadCliConfig(
     enabled: !!profileSelector,
   };
 
-  return new Config({
+  const constructConfigHandle = startupProfiler.start('construct_config');
+  const config = new Config({
     acpMode: isAcpMode,
     clientName,
     sessionId,
@@ -1126,6 +1140,8 @@ export async function loadCliConfig(
     },
     enableConseca: settings.security?.enableConseca,
   });
+  constructConfigHandle?.end();
+  return config;
 }
 
 function mergeExcludeTools(
