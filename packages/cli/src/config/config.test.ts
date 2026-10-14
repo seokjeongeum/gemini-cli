@@ -835,6 +835,36 @@ describe('loadCliConfig', () => {
       expect(projectRoot).not.toHaveBeenCalled();
     });
 
+    it('uses the component-wise path resolver for the worktree layout check', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      vi.spyOn(execaModule, 'execa').mockResolvedValue({
+        stdout: process.cwd(),
+      } as never);
+      const nativeRealpath = vi.fn(() => {
+        throw new Error('native realpath must not be needed for this check');
+      });
+      const originalNative = fs.realpathSync.native;
+      Object.defineProperty(fs.realpathSync, 'native', {
+        value: nativeRealpath,
+      });
+
+      try {
+        const config = await loadCliConfig(settings, 'test-session', argv, {
+          skipExtensions: true,
+        });
+
+        expect(config.getWorktreeSettings()).toBeUndefined();
+        expect(fs.realpathSync).toHaveBeenCalledWith(process.cwd());
+        expect(nativeRealpath).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(fs.realpathSync, 'native', {
+          value: originalNative,
+        });
+      }
+    });
+
     it('uses legacy worktree discovery if the physical top-level path is uncertain', async () => {
       const settings = createTestMergedSettings();
       process.argv = ['node', 'script.js'];

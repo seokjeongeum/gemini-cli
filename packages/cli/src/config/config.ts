@@ -1153,10 +1153,9 @@ async function resolveWorktreeSettings(
     // Git resolves the repository before this check, including core.worktree
     // overrides. Only Gemini worktrees can be inside .gemini/worktrees.
     try {
-      const physicalToplevel =
-        process.platform === 'win32'
-          ? realpathSync.native(toplevel)
-          : realpathSync(toplevel);
+      // Use the same component-wise resolver as isGeminiWorktree, including on
+      // Windows, rather than the native whole-path implementation.
+      const physicalToplevel = realpathSync(toplevel);
       const segments = physicalToplevel
         .split(path.sep)
         .map((segment) =>
