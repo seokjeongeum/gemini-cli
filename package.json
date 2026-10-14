@@ -17,9 +17,9 @@
     "sandboxImageUri": "us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.65.0-nightly.20261006.gfb972b2f8"
   },
   "scripts": {
-    "start": "cross-env NODE_ENV=development node scripts/start.js",
+    "start": "node scripts/start.js",
     "start:profile": "node scripts/profile-startup.js",
-    "start:prod": "cross-env NODE_ENV=production node scripts/start.js",
+    "start:prod": "node scripts/start.js",
     "start:a2a-server": "CODER_AGENT_PORT=41242 npm run start --workspace @google/gemini-cli-a2a-server",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "deflake": "node scripts/deflake.js",
