@@ -17,7 +17,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { spawn, execSync } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -27,7 +27,7 @@ const root = join(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
 
 // check build status, write warnings to file for app to display if needed
-execSync('node ./scripts/check-build-status.js', {
+execFileSync(process.execPath, [join(__dirname, 'check-build-status.js')], {
   stdio: 'inherit',
   cwd: root,
 });
@@ -35,9 +35,11 @@ execSync('node ./scripts/check-build-status.js', {
 const nodeArgs = ['--no-warnings=DEP0040'];
 let sandboxCommand = undefined;
 try {
-  sandboxCommand = execSync('node scripts/sandbox_command.js', {
-    cwd: root,
-  })
+  sandboxCommand = execFileSync(
+    process.execPath,
+    [join(__dirname, 'sandbox_command.js')],
+    { cwd: root },
+  )
     .toString()
     .trim();
 } catch {
@@ -86,7 +88,7 @@ if (isInDebugMode) {
   // than the relaunched process making it harder to debug.
   env.GEMINI_CLI_NO_RELAUNCH = 'true';
 }
-const child = spawn('node', nodeArgs, { stdio: 'inherit', env });
+const child = spawn(process.execPath, nodeArgs, { stdio: 'inherit', env });
 
 child.on('close', (code) => {
   process.exit(code);

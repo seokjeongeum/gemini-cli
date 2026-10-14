@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as execaModule from 'execa';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   OutputFormat,
@@ -32,6 +33,14 @@ import * as ServerConfig from '@google/gemini-cli-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { ExtensionManager } from './extension-manager.js';
 import { RESUME_LATEST } from '../utils/sessionUtils.js';
+
+vi.mock('execa', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('execa')>();
+  return {
+    ...actual,
+    execa: vi.fn(actual.execa),
+  };
+});
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
@@ -787,6 +796,143 @@ describe('loadCliConfig', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  describe('worktree discovery across startup configurations', () => {
+    it('does not repeat Git discovery after finding no Gemini worktree', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      const git = vi
+        .spyOn(execaModule, 'execa')
+        .mockResolvedValue({ stdout: process.cwd() } as never);
+      const projectRoot = vi
+        .spyOn(ServerConfig, 'getProjectRootForWorktree')
+        .mockResolvedValue(process.cwd());
+      vi.spyOn(ServerConfig, 'isGeminiWorktree').mockReturnValue(false);
+
+      const partialConfig = await loadCliConfig(
+        settings,
+        'test-session',
+        argv,
+        {
+          skipExtensions: true,
+        },
+      );
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        worktreeSettings: partialConfig.getWorktreeSettings() ?? null,
+      });
+
+      expect(partialConfig.getWorktreeSettings()).toBeUndefined();
+      expect(config.getWorktreeSettings()).toBeUndefined();
+      expect(git).toHaveBeenCalledExactlyOnceWith(
+        'git',
+        ['rev-parse', '--show-toplevel'],
+        { cwd: process.cwd(), env: expect.anything() },
+      );
+      expect(projectRoot).toHaveBeenCalledTimes(1);
+    });
+
+    it('retains a discovered Gemini worktree without repeating Git discovery', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      const worktreePath = path.join(
+        process.cwd(),
+        '.gemini',
+        'worktrees',
+        'startup-feature',
+      );
+      const git = vi
+        .spyOn(execaModule, 'execa')
+        .mockResolvedValueOnce({ stdout: worktreePath } as never)
+        .mockResolvedValueOnce({ stdout: 'base-sha' } as never);
+      vi.spyOn(ServerConfig, 'getProjectRootForWorktree').mockResolvedValue(
+        process.cwd(),
+      );
+      vi.spyOn(ServerConfig, 'isGeminiWorktree').mockReturnValue(true);
+
+      const partialConfig = await loadCliConfig(
+        settings,
+        'test-session',
+        argv,
+        {
+          skipExtensions: true,
+        },
+      );
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        worktreeSettings: partialConfig.getWorktreeSettings() ?? null,
+      });
+
+      expect(config.getWorktreeSettings()).toEqual({
+        name: 'startup-feature',
+        path: worktreePath,
+        baseSha: 'base-sha',
+      });
+      expect(git).toHaveBeenCalledTimes(2);
+      expect(git).toHaveBeenLastCalledWith('git', ['rev-parse', 'HEAD'], {
+        cwd: worktreePath,
+        env: expect.anything(),
+      });
+    });
+
+    it('uses explicit worktree settings without running Git discovery', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      const worktreeSettings = {
+        name: 'requested-feature',
+        path: path.join(
+          process.cwd(),
+          '.gemini',
+          'worktrees',
+          'requested-feature',
+        ),
+        baseSha: 'requested-base-sha',
+      };
+      const git = vi.spyOn(execaModule, 'execa');
+
+      const partialConfig = await loadCliConfig(
+        settings,
+        'test-session',
+        argv,
+        {
+          skipExtensions: true,
+          worktreeSettings,
+        },
+      );
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        worktreeSettings,
+      });
+
+      expect(partialConfig.getWorktreeSettings()).toEqual(worktreeSettings);
+      expect(config.getWorktreeSettings()).toEqual(worktreeSettings);
+      expect(git).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a failed Git probe during full configuration loading', async () => {
+      const settings = createTestMergedSettings();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments(settings);
+      const git = vi
+        .spyOn(execaModule, 'execa')
+        .mockRejectedValue(new Error('not a Git repository'));
+
+      const partialConfig = await loadCliConfig(
+        settings,
+        'test-session',
+        argv,
+        {
+          skipExtensions: true,
+        },
+      );
+      const config = await loadCliConfig(settings, 'test-session', argv, {
+        worktreeSettings: partialConfig.getWorktreeSettings() ?? null,
+      });
+
+      expect(config.getWorktreeSettings()).toBeUndefined();
+      expect(git).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('Model resolution', () => {
