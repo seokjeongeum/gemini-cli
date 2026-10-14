@@ -70,6 +70,39 @@ describe('getUserStartupWarnings', () => {
   });
 
   describe('home directory check', () => {
+    it('resolves each directory once per warning collection', async () => {
+      const realpathSpy = vi.spyOn(fs, 'realpath');
+
+      await getUserStartupWarnings({}, testRootDir);
+
+      expect(
+        realpathSpy.mock.calls.filter(([p]) => p === testRootDir),
+      ).toHaveLength(1);
+      expect(
+        realpathSpy.mock.calls.filter(([p]) => p === homeDir),
+      ).toHaveLength(1);
+
+      await getUserStartupWarnings({}, testRootDir);
+
+      expect(
+        realpathSpy.mock.calls.filter(([p]) => p === testRootDir),
+      ).toHaveLength(2);
+      expect(
+        realpathSpy.mock.calls.filter(([p]) => p === homeDir),
+      ).toHaveLength(2);
+    });
+
+    it('shares home and workspace resolution when they are the same directory', async () => {
+      const realpathSpy = vi.spyOn(fs, 'realpath');
+
+      const warnings = await getUserStartupWarnings({}, homeDir);
+
+      expect(realpathSpy).toHaveBeenCalledExactlyOnceWith(homeDir);
+      expect(warnings).toContainEqual(
+        expect.objectContaining({ id: 'home-directory' }),
+      );
+    });
+
     it('should return a warning when running in home directory', async () => {
       const warnings = await getUserStartupWarnings({}, homeDir);
       expect(warnings).toContainEqual(
@@ -91,11 +124,13 @@ describe('getUserStartupWarnings', () => {
     });
 
     it('should not return a warning when showHomeDirectoryWarning is false', async () => {
+      const realpathSpy = vi.spyOn(fs, 'realpath');
       const warnings = await getUserStartupWarnings(
         { ui: { showHomeDirectoryWarning: false } },
-        homeDir,
+        testRootDir,
       );
       expect(warnings.find((w) => w.id === 'home-directory')).toBeUndefined();
+      expect(realpathSpy).toHaveBeenCalledExactlyOnceWith(testRootDir);
     });
 
     it('should not return a warning when running in a subdirectory of home', async () => {
@@ -193,6 +228,31 @@ describe('getUserStartupWarnings', () => {
   });
 
   describe('folder trust check', () => {
+    it('rejects an untrusted headless workspace before directory resolution finishes', async () => {
+      const { isHeadlessMode, FatalUntrustedWorkspaceError } = await import(
+        '@google/gemini-cli-core'
+      );
+      let finishRealpath!: (realPath: string) => void;
+      const realpath = new Promise<string>((resolve) => {
+        finishRealpath = resolve;
+      });
+      vi.spyOn(fs, 'realpath').mockReturnValue(realpath);
+      vi.mocked(isFolderTrustEnabled).mockReturnValue(true);
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: undefined,
+      });
+      vi.mocked(isHeadlessMode).mockReturnValue(true);
+
+      try {
+        await expect(
+          getUserStartupWarnings({}, testRootDir),
+        ).rejects.toThrowError(FatalUntrustedWorkspaceError);
+      } finally {
+        finishRealpath(testRootDir);
+      }
+    });
+
     it('should throw FatalUntrustedWorkspaceError when untrusted in headless mode', async () => {
       const { isHeadlessMode, FatalUntrustedWorkspaceError } = await import(
         '@google/gemini-cli-core'

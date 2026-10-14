@@ -8,6 +8,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import process from 'node:process';
 import * as path from 'node:path';
+import { realpathSync } from 'node:fs';
 import { execa } from 'execa';
 import { mcpCommand } from '../commands/mcp.js';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -1149,6 +1150,29 @@ async function resolveWorktreeSettings(
       env: getSafeGitEnv(),
     });
     const toplevel = stdout.trim();
+    // Git resolves the repository before this check, including core.worktree
+    // overrides. Only Gemini worktrees can be inside .gemini/worktrees.
+    try {
+      const physicalToplevel =
+        process.platform === 'win32'
+          ? realpathSync.native(toplevel)
+          : realpathSync(toplevel);
+      const segments = physicalToplevel
+        .split(path.sep)
+        .map((segment) =>
+          process.platform === 'win32' ? segment.toLowerCase() : segment,
+        );
+      if (
+        !segments.some(
+          (segment, index) =>
+            segment === '.gemini' && segments[index + 1] === 'worktrees',
+        )
+      ) {
+        return undefined;
+      }
+    } catch {
+      // Preserve Git's full worktree discovery if the physical path is uncertain.
+    }
     const projectRoot = await getProjectRootForWorktree(toplevel);
 
     if (isGeminiWorktree(toplevel, projectRoot)) {
