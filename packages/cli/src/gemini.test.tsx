@@ -35,7 +35,11 @@ import { start_sandbox } from './utils/sandbox.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import os from 'node:os';
 import v8 from 'node:v8';
-import { loadSettings, type LoadedSettings } from './config/settings.js';
+import {
+  loadSettings,
+  SettingScope,
+  type LoadedSettings,
+} from './config/settings.js';
 import {
   createMockConfig,
   createMockSettings,
@@ -69,6 +73,19 @@ const runNonInteractiveSpy = vi.hoisted(() => vi.fn());
 vi.mock('./nonInteractiveCli.js', () => ({
   runNonInteractive: runNonInteractiveSpy,
 }));
+
+const liteRtStartupMocks = vi.hoisted(() => ({
+  imported: vi.fn(),
+  ensureRunning: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('./services/liteRtServerManager.js', () => {
+  liteRtStartupMocks.imported();
+  return {
+    LiteRtServerManager: {
+      ensureRunning: liteRtStartupMocks.ensureRunning,
+    },
+  };
+});
 
 const terminalNotificationMocks = vi.hoisted(() => ({
   notifyViaTerminal: vi.fn().mockResolvedValue(true),
@@ -285,6 +302,94 @@ vi.mock('./validateNonInterActiveAuth.js', () => ({
 vi.mock('./config/auth.js', () => ({
   validateAuthMethod: vi.fn().mockResolvedValue(null),
 }));
+
+describe('LiteRT startup', () => {
+  it('imports LiteRT only when enabled and preserves user-scoped auto-start settings', async () => {
+    const originalLoadSettings = vi
+      .mocked(loadSettings)
+      .getMockImplementation();
+    const originalLoadConfig = vi.mocked(loadCliConfig).getMockImplementation();
+    const originalParseArgs = vi.mocked(parseArguments).getMockImplementation();
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockReturnValue(undefined as never);
+    vi.stubEnv('SANDBOX', 'true');
+    vi.stubEnv('GEMINI_CLI_TRUST_WORKSPACE', 'true');
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      createMockConfig({ getQuestion: () => 'test question' }),
+    );
+    vi.mocked(parseArguments).mockResolvedValue({ isCommand: true } as CliArgs);
+
+    try {
+      for (const mergedGemma of [undefined, { enabled: false }]) {
+        vi.mocked(loadSettings).mockReturnValue(
+          createMockSettings({
+            merged: { experimental: { gemmaModelRouter: mergedGemma } },
+          }),
+        );
+        await main();
+        await vi.dynamicImportSettled();
+        expect(liteRtStartupMocks.imported).not.toHaveBeenCalled();
+      }
+
+      const userGemma = {
+        binaryPath: '/user/litert',
+        autoStartServer: false,
+      };
+      const forScope = vi.fn(() => ({
+        settings: { experimental: { gemmaModelRouter: userGemma } },
+      }));
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          merged: {
+            experimental: {
+              gemmaModelRouter: {
+                enabled: true,
+                binaryPath: '/workspace/litert',
+                autoStartServer: true,
+                classifier: { host: 'http://localhost:9379' },
+              },
+            },
+          },
+          forScope,
+        }),
+      );
+
+      await main();
+      await vi.dynamicImportSettled();
+      expect(liteRtStartupMocks.imported).not.toHaveBeenCalled();
+      expect(liteRtStartupMocks.ensureRunning).not.toHaveBeenCalled();
+
+      userGemma.autoStartServer = true;
+      await main();
+      await vi.dynamicImportSettled();
+      expect(liteRtStartupMocks.imported).toHaveBeenCalledOnce();
+      expect(forScope).toHaveBeenCalledWith(SettingScope.User);
+      expect(liteRtStartupMocks.ensureRunning).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          enabled: true,
+          binaryPath: '/user/litert',
+          autoStartServer: true,
+          classifier: expect.objectContaining({
+            host: 'http://localhost:9379',
+          }),
+        }),
+      );
+    } finally {
+      if (originalLoadSettings) {
+        vi.mocked(loadSettings).mockImplementation(originalLoadSettings);
+      }
+      if (originalLoadConfig) {
+        vi.mocked(loadCliConfig).mockImplementation(originalLoadConfig);
+      }
+      if (originalParseArgs) {
+        vi.mocked(parseArguments).mockImplementation(originalParseArgs);
+      }
+      processExitSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe('gemini.tsx main function', () => {
   let originalIsTTY: boolean | undefined;

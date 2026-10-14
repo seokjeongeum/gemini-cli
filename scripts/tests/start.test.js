@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   on: vi.fn(),
   exit: vi.fn(),
   stderrWrite: vi.fn(),
+  checkBuildStatus: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
@@ -23,6 +24,10 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => JSON.stringify({ version: 'test-version' })),
+}));
+
+vi.mock('../check-build-status.js', () => ({
+  checkBuildStatus: mocks.checkBuildStatus,
 }));
 
 const scriptsDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -42,6 +47,8 @@ describe('development launcher', () => {
       'GITHUB_ACTIONS',
       'GEMINI_KEEP_CI_ENV',
       'GEMINI_CLI_NO_RELAUNCH',
+      'npm_lifecycle_event',
+      'NODE_ENV',
     ]) {
       vi.stubEnv(name, '');
     }
@@ -53,6 +60,7 @@ describe('development launcher', () => {
       exit: mocks.exit,
     });
     mocks.execFileSync.mockReset().mockImplementation(() => Buffer.from(''));
+    mocks.checkBuildStatus.mockReset();
     mocks.spawn.mockReset().mockReturnValue({ on: mocks.on });
   });
 
@@ -61,7 +69,7 @@ describe('development launcher', () => {
     vi.unstubAllEnvs();
   });
 
-  it('runs helpers and the CLI with the current Node executable, preserving arguments', async () => {
+  it('checks the build in process and launches the CLI with literal arguments using the current Node executable', async () => {
     const args = ['-m', 'auto', '-p', 'spaces & %PATH% $HOME "quoted"'];
     process.argv.push(...args);
     vi.stubEnv('NODE_OPTIONS', '--max-old-space-size=4096');
@@ -69,18 +77,8 @@ describe('development launcher', () => {
 
     await import('../start.js');
 
-    expect(mocks.execFileSync).toHaveBeenNthCalledWith(
-      1,
-      nodeExecutable,
-      [join(scriptsDir, 'check-build-status.js')],
-      { stdio: 'inherit', cwd: root },
-    );
-    expect(mocks.execFileSync).toHaveBeenNthCalledWith(
-      2,
-      nodeExecutable,
-      [join(scriptsDir, 'sandbox_command.js')],
-      { cwd: root },
-    );
+    expect(mocks.checkBuildStatus).toHaveBeenCalledWith(root);
+    expect(mocks.execFileSync).not.toHaveBeenCalled();
     expect(mocks.spawn).toHaveBeenCalledWith(
       nodeExecutable,
       ['--no-warnings=DEP0040', join(root, 'packages', 'cli'), ...args],
@@ -103,7 +101,7 @@ describe('development launcher', () => {
 
   it('keeps the build failure fatal and does not start the CLI', async () => {
     const error = new Error('build check failed');
-    mocks.execFileSync.mockImplementationOnce(() => {
+    mocks.checkBuildStatus.mockImplementationOnce(() => {
       throw error;
     });
 
@@ -111,9 +109,44 @@ describe('development launcher', () => {
     expect(mocks.spawn).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['start', 'development'],
+    ['start:prod', 'production'],
+  ])(
+    'sets the npm %s launcher and CLI environment to %s',
+    async (lifecycleEvent, nodeEnv) => {
+      vi.stubEnv('npm_lifecycle_event', lifecycleEvent);
+      vi.stubEnv('NODE_ENV', 'inherited-value');
+      mocks.checkBuildStatus.mockImplementation(() => {
+        expect(process.env.NODE_ENV).toBe(nodeEnv);
+      });
+
+      await import('../start.js');
+
+      expect(mocks.spawn.mock.calls[0][2].env.NODE_ENV).toBe(nodeEnv);
+      expect(process.env.NODE_ENV).toBe(nodeEnv);
+    },
+  );
+
+  it.each(['', 'debug', 'another-script'])(
+    'preserves inherited NODE_ENV for direct and debug invocations with lifecycle event "%s"',
+    async (lifecycleEvent) => {
+      vi.stubEnv('npm_lifecycle_event', lifecycleEvent);
+      vi.stubEnv('NODE_ENV', 'inherited-value');
+      vi.stubEnv('DEBUG', lifecycleEvent === 'debug' ? '1' : '');
+      mocks.checkBuildStatus.mockImplementation(() => {
+        expect(process.env.NODE_ENV).toBe('inherited-value');
+      });
+
+      await import('../start.js');
+
+      expect(mocks.spawn.mock.calls[0][2].env.NODE_ENV).toBe('inherited-value');
+      expect(process.env.NODE_ENV).toBe('inherited-value');
+    },
+  );
+
   it('continues without sandbox and enables direct debugging when the probe fails', async () => {
     vi.stubEnv('DEBUG', 'true');
-    mocks.execFileSync.mockImplementationOnce(() => Buffer.from(''));
     mocks.execFileSync.mockImplementationOnce(() => {
       throw new Error('no sandbox');
     });
@@ -131,7 +164,6 @@ describe('development launcher', () => {
 
   it('keeps debug flags inside a selected sandbox', async () => {
     vi.stubEnv('DEBUG', '1');
-    mocks.execFileSync.mockImplementationOnce(() => Buffer.from(''));
     mocks.execFileSync.mockImplementationOnce(() => Buffer.from('docker\n'));
 
     await import('../start.js');
@@ -140,7 +172,29 @@ describe('development launcher', () => {
       '--no-warnings=DEP0040',
       join(root, 'packages', 'cli'),
     ]);
+    expect(mocks.execFileSync).toHaveBeenCalledWith(
+      nodeExecutable,
+      [join(scriptsDir, 'sandbox_command.js')],
+      { cwd: root },
+    );
   });
+
+  it.each(['', '0', 'false'])(
+    'starts ordinary sandboxed sessions without a debug probe when DEBUG=%s',
+    async (debug) => {
+      vi.stubEnv('DEBUG', debug);
+      vi.stubEnv('GEMINI_SANDBOX', 'docker');
+
+      await import('../start.js');
+
+      expect(mocks.execFileSync).not.toHaveBeenCalled();
+      expect(mocks.spawn.mock.calls[0][2].env.GEMINI_SANDBOX).toBe('docker');
+      expect(mocks.spawn.mock.calls[0][1]).toEqual([
+        '--no-warnings=DEP0040',
+        join(root, 'packages', 'cli'),
+      ]);
+    },
+  );
 
   it('preserves the debug port when already inside a sandbox', async () => {
     vi.stubEnv('DEBUG', '1');

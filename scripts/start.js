@@ -21,35 +21,44 @@ import { spawn, execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { checkBuildStatus } from './check-build-status.js';
+
+// Set npm start's environment here to avoid launching a cross-env process.
+// Direct invocations and the debug script keep their inherited environment.
+if (process.env.npm_lifecycle_event === 'start') {
+  process.env.NODE_ENV = 'development';
+} else if (process.env.npm_lifecycle_event === 'start:prod') {
+  process.env.NODE_ENV = 'production';
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
 
 // check build status, write warnings to file for app to display if needed
-execFileSync(process.execPath, [join(__dirname, 'check-build-status.js')], {
-  stdio: 'inherit',
-  cwd: root,
-});
+checkBuildStatus(root);
 
 const nodeArgs = ['--no-warnings=DEP0040'];
+const isInDebugMode = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
 let sandboxCommand = undefined;
-try {
-  sandboxCommand = execFileSync(
-    process.execPath,
-    [join(__dirname, 'sandbox_command.js')],
-    { cwd: root },
-  )
-    .toString()
-    .trim();
-} catch {
-  // ignore
+// The CLI resolves its own sandbox configuration. This probe only determines
+// where to attach the debugger, so ordinary startup does not need the helper.
+if (isInDebugMode) {
+  try {
+    sandboxCommand = execFileSync(
+      process.execPath,
+      [join(__dirname, 'sandbox_command.js')],
+      { cwd: root },
+    )
+      .toString()
+      .trim();
+  } catch {
+    // ignore
+  }
 }
 // if debugging is enabled and sandboxing is disabled, use --inspect-brk flag
 // note with sandboxing this flag is passed to the binary inside the sandbox
 // inside sandbox SANDBOX should be set and sandbox_command.js should fail
-const isInDebugMode = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
-
 if (isInDebugMode && !sandboxCommand) {
   if (process.env.SANDBOX) {
     const port = process.env.DEBUG_PORT || '9229';
