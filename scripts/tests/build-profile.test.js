@@ -17,7 +17,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { profileBuildPhase, summarizeBuildProfiles } from '../build-profile.js';
+import {
+  profileBuildPhase,
+  profileBuildPhaseAsync,
+  summarizeBuildProfiles,
+} from '../build-profile.js';
 import {
   createBuildPhaseCollector,
   getBuildPackageLabel,
@@ -62,6 +66,33 @@ describe('build phase collection', () => {
     expect(profileBuildPhase('private phase', () => 19)).toBe(19);
     expect(performance.getEntriesByType('mark')).toEqual([]);
     expect(performance.getEntriesByType('measure')).toEqual([]);
+  });
+
+  it('keeps asynchronous phases open until completion and records failures', async () => {
+    vi.stubEnv('GEMINI_BUILD_PROFILE_RUN_DIR', 'active');
+    let finish;
+    const pending = profileBuildPhaseAsync(
+      'build_parallel_workspaces',
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    expect(performance.getEntriesByType('measure')).toEqual([]);
+    finish(17);
+    await expect(pending).resolves.toBe(17);
+    const failure = new Error('workspace failure');
+    await expect(
+      profileBuildPhaseAsync('build_all_workspaces', async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(
+      performance.getEntriesByType('measure').map(({ name }) => name),
+    ).toEqual([
+      'build:build_parallel_workspaces:ok',
+      'build:build_all_workspaces:failed',
+    ]);
   });
 
   it('keeps operations usable after optional performance mark failure', () => {

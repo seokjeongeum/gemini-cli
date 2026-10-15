@@ -17,14 +17,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { profileBuildPhase } from './build-profile.js';
+import { profileBuildPhase, profileBuildPhaseAsync } from './build-profile.js';
+import {
+  discoverBuildWorkspaces,
+  preparePackageScript,
+} from './build-workspace.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
+
+function runScriptSync(directory, script) {
+  const { command, args, env } = preparePackageScript(directory, script);
+  execFileSync(command, args, { cwd: directory, env, stdio: 'inherit' });
+}
+
+async function runScript(directory, script) {
+  const { command, args, env } = preparePackageScript(directory, script);
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: directory,
+      env,
+      stdio: 'inherit',
+    });
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else
+        reject(new Error(`Build failed in ${directory} (${signal || code}).`));
+    });
+  });
+}
 
 // npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
@@ -34,42 +60,43 @@ if (!existsSync(join(root, 'node_modules'))) {
 }
 
 // build all workspaces/packages
-profileBuildPhase('generate_metadata', () =>
-  execSync('npm run generate', { stdio: 'inherit', cwd: root }),
+profileBuildPhase('generate_metadata', () => runScriptSync(root, 'generate'));
+
+const workspaces = profileBuildPhase('query_workspaces', () =>
+  discoverBuildWorkspaces(root),
 );
 
 if (process.env.CI) {
   console.log('CI environment detected. Building workspaces sequentially...');
-  profileBuildPhase('build_all_workspaces', () =>
-    execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root }),
-  );
+  await profileBuildPhaseAsync('build_all_workspaces', async () => {
+    for (const workspace of workspaces) {
+      await runScript(workspace.directory, 'build');
+    }
+  });
 } else {
   // Build core first because everyone depends on it
   console.log('Building @google/gemini-cli-core...');
-  profileBuildPhase('build_core', () =>
-    execSync('npm run build -w @google/gemini-cli-core', {
-      stdio: 'inherit',
-      cwd: root,
-    }),
+  const core = workspaces.find(
+    ({ name }) => name === '@google/gemini-cli-core',
   );
+  if (!core) throw new Error('Missing @google/gemini-cli-core workspace.');
+  profileBuildPhase('build_core', () => runScriptSync(core.directory, 'build'));
 
   // Build the rest in parallel
   console.log('Building other workspaces in parallel...');
-  const workspaceInfo = JSON.parse(
-    profileBuildPhase('query_workspaces', () =>
-      execSync('npm query .workspace --json', { cwd: root, encoding: 'utf-8' }),
-    ),
+  const parallelWorkspaces = workspaces.filter(
+    (workspace) => workspace !== core,
   );
-  const parallelWorkspaces = workspaceInfo
-    .map((w) => w.name)
-    .filter((name) => name !== '@google/gemini-cli-core');
 
-  profileBuildPhase('build_parallel_workspaces', () =>
-    execSync(
-      `npx --no-install npm-run-all --parallel ${parallelWorkspaces.map((w) => `"build -w ${w}"`).join(' ')}`,
-      { stdio: 'inherit', cwd: root },
-    ),
-  );
+  await profileBuildPhaseAsync('build_parallel_workspaces', async () => {
+    // Wait for every launched build, including after a failure, so the root
+    // process and profiler don't finish while children still write artifacts.
+    const results = await Promise.allSettled(
+      parallelWorkspaces.map(({ directory }) => runScript(directory, 'build')),
+    );
+    const failure = results.find(({ status }) => status === 'rejected');
+    if (failure) throw failure.reason;
+  });
 }
 
 // also build container image if sandboxing is enabled
