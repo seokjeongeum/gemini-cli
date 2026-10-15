@@ -18,7 +18,7 @@
 // limitations under the License.
 
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPackageUp } from 'read-package-up';
@@ -73,5 +73,13 @@ export const GIT_COMMIT_INFO = '${gitCommitInfo}';
 export const CLI_VERSION = '${cliVersion}';
 `;
 
-writeFileSync(cliGitCommitFile, fileContent);
-writeFileSync(coreGitCommitFile, fileContent);
+// Preserve source mtimes when the metadata did not change, so TypeScript's
+// incremental builder does not need timestamp-only updates for these projects.
+for (const outputFile of [cliGitCommitFile, coreGitCommitFile]) {
+  if (
+    !existsSync(outputFile) ||
+    readFileSync(outputFile, 'utf-8') !== fileContent
+  ) {
+    writeFileSync(outputFile, fileContent);
+  }
+}

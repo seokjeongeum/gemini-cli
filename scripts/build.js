@@ -61,20 +61,17 @@ if (process.env.CI) {
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above
-try {
-  execSync('node scripts/sandbox_command.js -q', {
-    stdio: 'inherit',
-    cwd: root,
-  });
-  if (
-    process.env.BUILD_SANDBOX === '1' ||
-    process.env.BUILD_SANDBOX === 'true'
-  ) {
+if (process.env.BUILD_SANDBOX === '1' || process.env.BUILD_SANDBOX === 'true') {
+  try {
+    execSync('node scripts/sandbox_command.js -q', {
+      stdio: 'inherit',
+      cwd: root,
+    });
     execSync('node scripts/build_sandbox.js -s', {
       stdio: 'inherit',
       cwd: root,
     });
+  } catch {
+    // ignore
   }
-} catch {
-  // ignore
 }
