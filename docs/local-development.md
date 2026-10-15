@@ -167,6 +167,55 @@ refer to the same directory on Windows. The diagnostic changes no settings and
 doesn't identify which system component caused a delay. Compare repeated runs on
 the affected machine before drawing a performance conclusion.
 
+## Profile builds
+
+Use the build profiler to record the normal build and its child Node processes:
+
+```sh
+npm run build:profile
+```
+
+This runs `npm run build` once with the same environment, terminal streams, CI
+mode, sandbox selection, and exit status. It doesn't skip build steps or enable
+additional caching. You don't need to run a separate build first.
+
+The command prints its report directory and writes `summary.json` plus
+`process-<pid>.json` files under an ignored `.gemini/build-profiles/<run>/`
+directory. Set `GEMINI_BUILD_PROFILE_DIR` to select another output location.
+Normal `npm run build` doesn't create reports.
+
+Use these fields to inspect the run:
+
+- `elapsedMs` measures the nested `npm run build` through its exit, including
+  its launch and descendants. It excludes the outer `npm run build:profile`
+  command and profiling wrapper setup.
+- `exitCode` preserves the build result. Check this before comparing timings.
+- `processStartMs` uses a shared launch clock. `nodeBootToExitMs` measures the
+  observed Node lifetime through its exit callback, including initial profiling
+  setup and its initial report write but excluding its final report write.
+- `phases` contains fixed stage names with start times, durations, and an `ok`
+  or `failed` status. Failed or interrupted children can have incomplete data;
+  missing stages don't mean zero work.
+
+Root stages separate metadata generation, core building, workspace discovery,
+parallel or CI builds, and requested dependency installation or sandbox builds.
+Package stages separate TypeScript compilation, browser MCP bundling, asset
+copying, documentation copying, and the build stamp. Process labels also
+identify TypeScript, devtools, VS Code, browser MCP, npm, and workspace runners.
+Other Node children use the fixed `other-node` label. Non-Node tool costs appear
+within their enclosing stages rather than as separate process records.
+
+Parent stages, child lifetimes, and parallel workspaces overlap. Don't sum them
+to calculate total build time. Compare identical successful workloads and note
+that profiling adds a wrapper, preload, and local report I/O.
+
+Reports contain fixed process and package labels, timing metadata, runtime
+versions, and build-mode flags. They omit command arguments, environment values,
+filesystem paths, output, and error text. Each process report retains at most 64
+phases. The summary retains at most 256 processes; `omittedProcessCount`
+identifies additional process reports when the aggregate exceeds that bound. If
+reporting is unavailable, the build still runs normally.
+
 ## Tracing
 
 Gemini CLI uses OpenTelemetry (OTel) to record traces that help you debug agent

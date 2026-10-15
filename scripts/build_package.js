@@ -20,6 +20,7 @@
 import { execSync } from 'node:child_process';
 import { writeFileSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { profileBuildPhase } from './build-profile.js';
 
 if (!process.cwd().includes('packages')) {
   console.error('must be invoked from a package directory');
@@ -29,33 +30,43 @@ if (!process.cwd().includes('packages')) {
 const packageName = basename(process.cwd());
 
 // build typescript files
-execSync('tsc --build', { stdio: 'inherit' });
+profileBuildPhase('compile_typescript', () =>
+  execSync('tsc --build', { stdio: 'inherit' }),
+);
 
 // Run package-specific bundling if the script exists
 const bundleScript = join(process.cwd(), 'scripts', 'bundle-browser-mcp.mjs');
 if (packageName === 'core' && existsSync(bundleScript)) {
   console.log('Running chrome devtools MCP bundling...');
-  execSync('npm run bundle:browser-mcp', {
-    stdio: 'inherit',
-  });
+  profileBuildPhase('bundle_browser_mcp', () =>
+    execSync('npm run bundle:browser-mcp', {
+      stdio: 'inherit',
+    }),
+  );
 }
 
 // copy .{md,json} files
-execSync('node ../../scripts/copy_files.js', { stdio: 'inherit' });
+profileBuildPhase('copy_assets', () =>
+  execSync('node ../../scripts/copy_files.js', { stdio: 'inherit' }),
+);
 
 // Copy documentation for the core package
 if (packageName === 'core') {
   const docsSource = join(process.cwd(), '..', '..', 'docs');
   const docsTarget = join(process.cwd(), 'dist', 'docs');
   if (existsSync(docsSource)) {
-    if (existsSync(docsTarget)) {
-      rmSync(docsTarget, { recursive: true, force: true });
-    }
-    cpSync(docsSource, docsTarget, { recursive: true, dereference: true });
+    profileBuildPhase('copy_docs', () => {
+      if (existsSync(docsTarget)) {
+        rmSync(docsTarget, { recursive: true, force: true });
+      }
+      cpSync(docsSource, docsTarget, { recursive: true, dereference: true });
+    });
     console.log('Copied documentation to dist/docs');
   }
 }
 
 // touch dist/.last_build
-writeFileSync(join(process.cwd(), 'dist', '.last_build'), '');
+profileBuildPhase('write_build_stamp', () =>
+  writeFileSync(join(process.cwd(), 'dist', '.last_build'), ''),
+);
 process.exit(0);
