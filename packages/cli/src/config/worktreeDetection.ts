@@ -62,7 +62,14 @@ export function canSkipWorktreeDiscovery(cwd: string): boolean {
       fs.lstatSync(path.join(gitDir, 'commondir'));
       return false;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        error.code !== 'ENOENT'
+      ) {
+        return false;
+      }
     }
 
     // Reject redirects, includes, worktreeConfig, and line continuations rather
