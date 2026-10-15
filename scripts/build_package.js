@@ -17,10 +17,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { writeFileSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { profileBuildPhase } from './build-profile.js';
+import { preparePackageScript } from './build-workspace.js';
+import { copyPackageAssets } from './copy_files.js';
 
 if (!process.cwd().includes('packages')) {
   console.error('must be invoked from a package directory');
@@ -31,24 +34,36 @@ const packageName = basename(process.cwd());
 
 // build typescript files
 profileBuildPhase('compile_typescript', () =>
-  execSync('tsc --build', { stdio: 'inherit' }),
+  execFileSync(
+    process.execPath,
+    [
+      createRequire(join(process.cwd(), 'package.json')).resolve(
+        'typescript/bin/tsc',
+      ),
+      '--build',
+    ],
+    { stdio: 'inherit' },
+  ),
 );
 
 // Run package-specific bundling if the script exists
 const bundleScript = join(process.cwd(), 'scripts', 'bundle-browser-mcp.mjs');
 if (packageName === 'core' && existsSync(bundleScript)) {
   console.log('Running chrome devtools MCP bundling...');
-  profileBuildPhase('bundle_browser_mcp', () =>
-    execSync('npm run bundle:browser-mcp', {
+  profileBuildPhase('bundle_browser_mcp', () => {
+    const { command, args, env } = preparePackageScript(
+      process.cwd(),
+      'bundle:browser-mcp',
+    );
+    execFileSync(command, args, {
       stdio: 'inherit',
-    }),
-  );
+      env,
+    });
+  });
 }
 
 // copy .{md,json} files
-profileBuildPhase('copy_assets', () =>
-  execSync('node ../../scripts/copy_files.js', { stdio: 'inherit' }),
-);
+profileBuildPhase('copy_assets', () => copyPackageAssets());
 
 // Copy documentation for the core package
 if (packageName === 'core') {

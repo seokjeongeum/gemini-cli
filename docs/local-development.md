@@ -215,6 +215,22 @@ phases. The summary retains at most 256 processes; `omittedProcessCount`
 identifies additional process reports when the aggregate exceeds that bound. If
 reporting is unavailable, the build still runs normally.
 
+The package builder runs TypeScript directly with `tsc --build`; the root
+TypeScript configuration already enables incremental compilation. Workspace
+discovery reads local manifests, and simple `node <script>` commands run
+directly without an extra npm or shell process. Scripts with lifecycle hooks or
+compound commands continue through npm. Asset copying runs inside the package
+builder. CI builds remain sequential; local builds finish core before starting
+the other workspaces in parallel. A failed parallel build waits for all launched
+children before returning failure.
+
+For a performance comparison, use the same checkout, Node version, environment,
+and command on the same machine. Record an initial run and repeated runs with
+unchanged sources separately; compare successful `summary.json` reports. A stage
+that takes much longer than its child Node lifetime includes launch, wrapper,
+and return costs. It doesn't establish which operating system component caused
+the delay. Linux measurements don't establish a Windows speedup.
+
 ## Tracing
 
 Gemini CLI uses OpenTelemetry (OTel) to record traces that help you debug agent

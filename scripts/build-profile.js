@@ -41,6 +41,33 @@ export function profileBuildPhase(name, operation) {
   }
 }
 
+// Asynchronous orchestration must keep the phase open until its children exit.
+export async function profileBuildPhaseAsync(name, operation) {
+  let start;
+  if (process.env['GEMINI_BUILD_PROFILE_RUN_DIR'] && BUILD_PHASES.has(name)) {
+    try {
+      start = performance.mark(`build:${name}:start`).startTime;
+    } catch {
+      // Profiling remains optional.
+    }
+  }
+  let status = 'failed';
+  try {
+    const result = await operation();
+    status = 'ok';
+    return result;
+  } finally {
+    if (start !== undefined) {
+      try {
+        performance.measure(`build:${name}:${status}`, { start });
+        performance.clearMarks(`build:${name}:start`);
+      } catch {
+        // Reporting must not hide the original build failure.
+      }
+    }
+  }
+}
+
 export function summarizeBuildProfiles(
   profiles,
   { elapsedMs, exitCode, env = process.env },
