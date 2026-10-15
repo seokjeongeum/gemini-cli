@@ -2247,6 +2247,7 @@ describe('Settings Loading and Merging', () => {
             newsrv: { command: 'echo' },
           },
         }),
+        ['mcpServers'],
       );
 
       vi.mocked(updateSettingsFilePreservingFormat).mockClear();
@@ -2760,6 +2761,7 @@ describe('Settings Loading and Merging', () => {
         expect.objectContaining({
           general: expect.objectContaining({ enableAutoUpdate: false }),
         }),
+        ['general'],
       );
     });
 
