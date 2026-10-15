@@ -16,10 +16,20 @@ import {
 import { getIdeProcessInfo } from './process-utils.js';
 import os from 'node:os';
 
-const mockedExec = vi.hoisted(() => vi.fn());
-vi.mock('node:util', () => ({
-  promisify: vi.fn().mockReturnValue(mockedExec),
+const { mockedExec, mockedExecFile } = vi.hoisted(() => ({
+  mockedExec: vi.fn(),
+  mockedExecFile: vi.fn(),
 }));
+vi.mock('node:util', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:util')>();
+  const { execFile } = await import('node:child_process');
+  return {
+    ...actual,
+    promisify: vi.fn((fn: unknown) =>
+      fn === execFile ? mockedExecFile : mockedExec,
+    ),
+  };
+});
 vi.mock('node:os', () => ({
   default: {
     platform: vi.fn(),
@@ -30,6 +40,7 @@ describe('getIdeProcessInfo', () => {
   beforeEach(() => {
     Object.defineProperty(process, 'pid', { value: 1000, configurable: true });
     mockedExec.mockReset();
+    mockedExecFile.mockReset();
   });
 
   afterEach(() => {
@@ -63,7 +74,9 @@ describe('getIdeProcessInfo', () => {
           CommandLine: 'C:\\Program Files\\VSCode\\Code.exe',
         },
       ];
-      mockedExec.mockResolvedValueOnce({ stdout: JSON.stringify(processes) });
+      mockedExecFile.mockResolvedValueOnce({
+        stdout: JSON.stringify(processes),
+      });
 
       const result = await getIdeProcessInfo();
 
@@ -71,16 +84,29 @@ describe('getIdeProcessInfo', () => {
         pid: 54321,
         command: 'C:\\Program Files\\VSCode\\Code.exe',
       });
-      expect(mockedExec).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine',
-        ),
-        expect.anything(),
+      expect(mockedExecFile).toHaveBeenCalledExactlyOnceWith(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress',
+        ],
+        {
+          maxBuffer: 10 * 1024 * 1024,
+          timeout: 5000,
+          windowsHide: true,
+        },
       );
+      expect(mockedExec).not.toHaveBeenCalled();
     });
   });
 
   describe('on Unix', () => {
+    afterEach(() => {
+      expect(mockedExecFile).not.toHaveBeenCalled();
+    });
+
     it('should traverse up to find the shell and return grandparent process info', async () => {
       (os.platform as Mock).mockReturnValue('linux');
       // process (1000) -> shell (800) -> IDE (700)
@@ -122,6 +148,10 @@ describe('getIdeProcessInfo', () => {
   });
 
   describe('on Windows', () => {
+    afterEach(() => {
+      expect(mockedExec).not.toHaveBeenCalled();
+    });
+
     it('should traverse up and find the great-grandchild of the root process', async () => {
       (os.platform as Mock).mockReturnValue('win32');
       // process (1000) -> powershell (900) -> code (800) -> wininit (700) -> root (0)
@@ -153,13 +183,21 @@ describe('getIdeProcessInfo', () => {
           CommandLine: 'wininit.exe',
         },
       ];
-      mockedExec.mockResolvedValueOnce({ stdout: JSON.stringify(processes) });
+      mockedExecFile.mockResolvedValueOnce({
+        stdout: JSON.stringify(processes),
+      });
 
       const result = await getIdeProcessInfo();
       expect(result).toEqual({ pid: 900, command: 'powershell.exe' });
-      expect(mockedExec).toHaveBeenCalledWith(
-        expect.stringContaining('Get-CimInstance Win32_Process'),
-        expect.anything(),
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          expect.stringContaining('Get-CimInstance Win32_Process'),
+        ],
+        expect.objectContaining({ timeout: 5000, windowsHide: true }),
       );
     });
 
@@ -174,7 +212,9 @@ describe('getIdeProcessInfo', () => {
           CommandLine: 'node.exe',
         },
       ];
-      mockedExec.mockResolvedValueOnce({ stdout: JSON.stringify(processes) });
+      mockedExecFile.mockResolvedValueOnce({
+        stdout: JSON.stringify(processes),
+      });
 
       const result = await getIdeProcessInfo();
       expect(result).toEqual({ pid: 1000, command: 'node.exe' });
@@ -182,22 +222,39 @@ describe('getIdeProcessInfo', () => {
 
     it('should handle PowerShell failure gracefully', async () => {
       (os.platform as Mock).mockReturnValue('win32');
-      mockedExec.mockRejectedValueOnce(new Error('PowerShell failed'));
-      // Fallback to getProcessInfo for current PID
-      mockedExec.mockResolvedValueOnce({ stdout: '' }); // ps command fails on windows
+      mockedExecFile.mockRejectedValueOnce(new Error('PowerShell failed'));
 
       const result = await getIdeProcessInfo();
       expect(result).toEqual({ pid: 1000, command: '' });
+      expect(mockedExecFile).toHaveBeenCalledOnce();
     });
 
     it('should handle malformed JSON output gracefully', async () => {
       (os.platform as Mock).mockReturnValue('win32');
-      mockedExec.mockResolvedValueOnce({ stdout: '{"invalid":json}' });
-      // Fallback to getProcessInfo for current PID
-      mockedExec.mockResolvedValueOnce({ stdout: '' });
+      mockedExecFile.mockResolvedValueOnce({ stdout: '{"invalid":json}' });
 
       const result = await getIdeProcessInfo();
       expect(result).toEqual({ pid: 1000, command: '' });
+      expect(mockedExecFile).toHaveBeenCalledOnce();
+    });
+
+    it('does not launch a Unix lookup when the snapshot omits this process', async () => {
+      (os.platform as Mock).mockReturnValue('win32');
+      mockedExecFile.mockResolvedValueOnce({
+        stdout: JSON.stringify([
+          {
+            ProcessId: 900,
+            ParentProcessId: 0,
+            Name: 'Code.exe',
+            CommandLine: 'Code.exe',
+          },
+        ]),
+      });
+
+      const result = await getIdeProcessInfo();
+
+      expect(result).toEqual({ pid: 1000, command: '' });
+      expect(mockedExecFile).toHaveBeenCalledOnce();
     });
 
     it('should handle single process output from ConvertTo-Json', async () => {
@@ -208,7 +265,7 @@ describe('getIdeProcessInfo', () => {
         Name: 'node.exe',
         CommandLine: 'node.exe',
       };
-      mockedExec.mockResolvedValueOnce({ stdout: JSON.stringify(process) });
+      mockedExecFile.mockResolvedValueOnce({ stdout: JSON.stringify(process) });
 
       const result = await getIdeProcessInfo();
       expect(result).toEqual({ pid: 1000, command: 'node.exe' });
@@ -231,7 +288,9 @@ describe('getIdeProcessInfo', () => {
           CommandLine: 'parent.exe',
         },
       ];
-      mockedExec.mockResolvedValueOnce({ stdout: JSON.stringify(processes) });
+      mockedExecFile.mockResolvedValueOnce({
+        stdout: JSON.stringify(processes),
+      });
 
       const result = await getIdeProcessInfo();
       // Ancestors: [1000, 900]. Length < 3, returns last (900)

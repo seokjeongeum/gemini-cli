@@ -801,6 +801,45 @@ describe('loadCliConfig', () => {
   });
 
   describe('worktree discovery across startup configurations', () => {
+    it.each(['none', 'GIT_DIR', 'GIT_WORK_TREE'])(
+      'checks an ordinary checkout root with %s discovery override',
+      async (variable) => {
+        for (const name of Object.keys(process.env)) {
+          // Presence, including an empty value, deliberately retains Git discovery.
+          if (name.toUpperCase().startsWith('GIT_'))
+            vi.stubEnv(name, undefined);
+        }
+        const actualFs =
+          await vi.importActual<typeof import('node:fs')>('node:fs');
+        vi.mocked(fs.realpathSync).mockImplementation(actualFs.realpathSync);
+        const fixtureRoot = await mkdtemp(
+          path.join(os.tmpdir(), 'gemini-ordinary-startup-'),
+        );
+        try {
+          await execaModule.execa('git', ['init', '--quiet', fixtureRoot], {
+            env: ServerConfig.getSafeGitEnv(),
+          });
+          const settings = createTestMergedSettings();
+          process.argv = ['node', 'script.js'];
+          const argv = await parseArguments(settings);
+          const git = vi.spyOn(execaModule, 'execa').mockClear();
+          if (variable !== 'none') {
+            vi.stubEnv(variable, variable === 'GIT_DIR' ? '' : fixtureRoot);
+          }
+
+          const config = await loadCliConfig(settings, 'test-session', argv, {
+            cwd: fixtureRoot,
+            skipExtensions: true,
+          });
+
+          expect(config.getWorktreeSettings()).toBeUndefined();
+          expect(git).toHaveBeenCalledTimes(variable === 'none' ? 0 : 1);
+        } finally {
+          await rm(fixtureRoot, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('does not repeat Git discovery after finding no Gemini worktree', async () => {
       const settings = createTestMergedSettings();
       process.argv = ['node', 'script.js'];
@@ -964,74 +1003,111 @@ describe('loadCliConfig', () => {
       expect(projectRoot).not.toHaveBeenCalled();
     });
 
-    it.each(['invalid nested marker', 'core.worktree redirect'])(
-      'discovers a real Gemini worktree with %s',
-      async (layout) => {
-        const actualFs =
-          await vi.importActual<typeof import('node:fs')>('node:fs');
-        const realpath = vi
-          .spyOn(fs, 'realpathSync')
-          .mockImplementation(actualFs.realpathSync);
-        Object.defineProperty(realpath, 'native', {
-          value: actualFs.realpathSync.native,
-          configurable: true,
+    it.each([
+      'invalid nested marker',
+      'core.worktree redirect',
+      'include redirect',
+      'invalid marker outside worktree',
+    ])('keeps Git authoritative with %s', async (layout) => {
+      for (const name of Object.keys(process.env)) {
+        if (name.toUpperCase().startsWith('GIT_')) vi.stubEnv(name, undefined);
+      }
+      const actualFs =
+        await vi.importActual<typeof import('node:fs')>('node:fs');
+      vi.mocked(fs.realpathSync).mockImplementation(actualFs.realpathSync);
+      const fixtureRoot = await mkdtemp(
+        path.join(os.tmpdir(), 'gemini-worktree-startup-'),
+      );
+      const gitEnv = ServerConfig.getSafeGitEnv();
+      try {
+        await execaModule.execa('git', ['init', '--quiet', fixtureRoot], {
+          env: gitEnv,
         });
-        const fixtureRoot = await mkdtemp(
-          path.join(os.tmpdir(), 'gemini-worktree-startup-'),
+        await execaModule.execa(
+          'git',
+          [
+            '-c',
+            'user.name=Startup test',
+            '-c',
+            'user.email=startup-test@example.invalid',
+            'commit',
+            '--quiet',
+            '--allow-empty',
+            '-m',
+            'Initial fixture commit',
+          ],
+          { cwd: fixtureRoot, env: gitEnv },
         );
-        const gitEnv = ServerConfig.getSafeGitEnv();
-        try {
-          await execaModule.execa('git', ['init', '--quiet', fixtureRoot], {
-            env: gitEnv,
-          });
-          await execaModule.execa(
-            'git',
-            [
-              '-c',
-              'user.name=Startup test',
-              '-c',
-              'user.email=startup-test@example.invalid',
-              'commit',
-              '--quiet',
-              '--allow-empty',
-              '-m',
-              'Initial fixture commit',
-            ],
-            { cwd: fixtureRoot, env: gitEnv },
-          );
-          const worktreePath = path.join(
-            fixtureRoot,
-            '.gemini',
-            'worktrees',
-            'startup-feature',
+        const worktreePath = path.join(
+          fixtureRoot,
+          '.gemini',
+          'worktrees',
+          'startup-feature',
+        );
+        await execaModule.execa(
+          'git',
+          ['worktree', 'add', '-b', 'startup-feature', worktreePath],
+          { cwd: fixtureRoot, env: gitEnv },
+        );
+        let cwd = fixtureRoot;
+        if (layout === 'invalid nested marker') {
+          cwd = path.join(worktreePath, 'src');
+          await mkdir(path.join(cwd, '.git'), { recursive: true });
+        } else if (layout === 'include redirect') {
+          const includePath = path.join(fixtureRoot, 'redirect.config');
+          actualFs.writeFileSync(
+            includePath,
+            `[core]\n\tworktree = ${worktreePath.replaceAll('\\', '/')}\n`,
           );
           await execaModule.execa(
             'git',
-            ['worktree', 'add', '-b', 'startup-feature', worktreePath],
+            ['config', 'include.path', includePath],
             { cwd: fixtureRoot, env: gitEnv },
           );
-          let cwd = fixtureRoot;
-          if (layout === 'invalid nested marker') {
-            cwd = path.join(worktreePath, 'src');
-            await mkdir(path.join(cwd, '.git'), { recursive: true });
-          } else {
-            await execaModule.execa(
-              'git',
-              ['config', 'core.worktree', worktreePath],
-              { cwd: fixtureRoot, env: gitEnv },
-            );
+        } else {
+          await execaModule.execa(
+            'git',
+            ['config', 'core.worktree', worktreePath],
+            { cwd: fixtureRoot, env: gitEnv },
+          );
+          if (layout === 'invalid marker outside worktree') {
+            cwd = path.join(fixtureRoot, 'src');
+            await mkdir(path.join(cwd, '.git', 'objects'), {
+              recursive: true,
+            });
+            await mkdir(path.join(cwd, '.git', 'refs'));
+            actualFs.writeFileSync(path.join(cwd, '.git', 'HEAD'), 'invalid');
+            actualFs.writeFileSync(path.join(cwd, '.git', 'config'), '');
           }
-          const settings = createTestMergedSettings();
-          process.argv = ['node', 'script.js'];
-          const argv = await parseArguments(settings);
-          const git = vi.spyOn(execaModule, 'execa');
+        }
+        // Some Git versions expose an included core.worktree to `git config`
+        // without applying it during repository discovery. Preserve the
+        // authoritative result rather than assuming that include redirects it.
+        const expectedToplevel =
+          layout === 'include redirect'
+            ? (
+                await execaModule.execa(
+                  'git',
+                  ['rev-parse', '--show-toplevel'],
+                  { cwd, env: gitEnv },
+                )
+              ).stdout.trim()
+            : worktreePath;
+        const settings = createTestMergedSettings();
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments(settings);
+        const git = vi.spyOn(execaModule, 'execa').mockClear();
 
-          const config = await loadCliConfig(settings, 'test-session', argv, {
-            cwd,
-            skipExtensions: true,
-          });
+        const config = await loadCliConfig(settings, 'test-session', argv, {
+          cwd,
+          skipExtensions: true,
+        });
 
-          const worktree = config.getWorktreeSettings();
+        const worktree = config.getWorktreeSettings();
+        if (
+          actualFs.realpathSync(expectedToplevel) ===
+          actualFs.realpathSync(worktreePath)
+        ) {
           expect(worktree).toMatchObject({
             name: 'startup-feature',
             baseSha: expect.any(String),
@@ -1039,16 +1115,18 @@ describe('loadCliConfig', () => {
           expect(actualFs.realpathSync(worktree!.path)).toBe(
             actualFs.realpathSync(worktreePath),
           );
-          expect(git).toHaveBeenCalledWith(
-            'git',
-            ['rev-parse', '--show-toplevel'],
-            { cwd, env: expect.anything() },
-          );
-        } finally {
-          await rm(fixtureRoot, { recursive: true, force: true });
+        } else {
+          expect(worktree).toBeUndefined();
         }
-      },
-    );
+        expect(git).toHaveBeenCalledWith(
+          'git',
+          ['rev-parse', '--show-toplevel'],
+          { cwd, env: expect.anything() },
+        );
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    });
 
     it('retains a discovered Gemini worktree without repeating Git discovery', async () => {
       const settings = createTestMergedSettings();

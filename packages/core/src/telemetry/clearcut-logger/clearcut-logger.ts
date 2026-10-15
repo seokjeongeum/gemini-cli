@@ -6,7 +6,8 @@
 
 import { createHash } from 'node:crypto';
 import * as os from 'node:os';
-import si from 'systeminformation';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type {
   StartSessionEvent,
@@ -78,6 +79,7 @@ import {
 } from '../../ide/detect-ide.js';
 import { debugLogger } from '../../utils/debugLogger.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { getWindowsPowerShellPath } from '../../utils/security.js';
 
 export enum EventNames {
   START_SESSION = 'start_session',
@@ -263,9 +265,44 @@ const MAX_RETRY_EVENTS = 100;
 const NO_GPU = 'NA';
 
 let cachedGpuInfo: string | undefined;
+const execFileAsync = promisify(execFile);
+
+async function getWindowsGpuInfo(): Promise<string> {
+  // Only controller names are logged. Avoid collecting display properties,
+  // scanning driver directories, or invoking vendor-specific utilities.
+  const command =
+    "$ErrorActionPreference = 'Stop'; " +
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); ' +
+    'ConvertTo-Json -Compress -InputObject @(' +
+    'Get-CimInstance -ClassName Win32_VideoController -Property Name | ' +
+    'Select-Object -ExpandProperty Name)';
+  const { stdout } = await execFileAsync(
+    getWindowsPowerShellPath(),
+    ['-NoProfile', '-NonInteractive', '-Command', command],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+    },
+  );
+  const result: unknown = JSON.parse(stdout);
+  const names = Array.isArray(result) ? result : [result];
+  if (!names.every((name): name is string => typeof name === 'string')) {
+    throw new Error('Invalid GPU controller names.');
+  }
+  return names.join(', ') || NO_GPU;
+}
 
 async function refreshGpuInfo(): Promise<void> {
   try {
+    if (os.platform() === 'win32') {
+      cachedGpuInfo = await getWindowsGpuInfo();
+      return;
+    }
+    // This module initializes Windows console helpers when imported. Load it
+    // only when collecting the session's device information.
+    const { default: si } = await import('systeminformation');
     const graphics = await si.graphics();
     if (graphics.controllers && graphics.controllers.length > 0) {
       cachedGpuInfo = graphics.controllers.map((c) => c.model).join(', ');

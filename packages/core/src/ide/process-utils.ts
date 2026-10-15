@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const MAX_TRAVERSAL_DEPTH = 32;
 
@@ -37,13 +38,13 @@ async function getProcessTableWindows(): Promise<Map<number, ProcessInfo>> {
     const powershellCommand =
       'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress';
     // Increase maxBuffer to handle large process lists (default is 1MB)
-    const { stdout } = await execAsync(
-      'powershell -NoProfile -NonInteractive -Command "' +
-        powershellCommand +
-        '"',
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', powershellCommand],
       {
         maxBuffer: 10 * 1024 * 1024,
         timeout: 5000,
+        windowsHide: true,
       },
     );
 
@@ -178,9 +179,10 @@ async function getIdeProcessInfoForWindows(): Promise<{
   const myProc = processMap.get(myPid);
 
   if (!myProc) {
-    // Fallback: try to get info for current process directly if snapshot fails
-    const { command } = await getProcessInfo(myPid);
-    return { pid: myPid, command };
+    // The snapshot could not identify this process. The Unix `ps` fallback
+    // cannot recover Windows IDE ancestry, so keep the unknown command instead
+    // of launching another subprocess.
+    return { pid: myPid, command: '' };
   }
 
   // Perform tree traversal in memory.
