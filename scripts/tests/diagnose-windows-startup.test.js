@@ -93,6 +93,10 @@ describe('startup diagnostic', () => {
     ]) {
       expect(record.elapsedMs).toBeGreaterThanOrEqual(0);
     }
+    for (const record of report.processMeasurements) {
+      expect(record.spawnCallMs).toBeGreaterThanOrEqual(0);
+      expect(record.spawnCallMs).toBeLessThanOrEqual(record.elapsedMs);
+    }
   }, 30_000);
 
   it('returns a partial report when the total budget expires', async () => {

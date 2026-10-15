@@ -9,6 +9,8 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance, PerformanceObserver } from 'node:perf_hooks';
 import { isMainThread } from 'node:worker_threads';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 
 // Only names used by StartupProfiler are recorded. Arbitrary performance marks
 // and their details can contain user data and must not enter a timing report.
@@ -62,6 +64,163 @@ const ENTRYPOINTS = new Set([
 ]);
 
 export const milliseconds = (value) => Math.round(value * 1000) / 1000;
+
+const PROCESS_APIS = new Set([
+  'spawn',
+  'spawnSync',
+  'execSync',
+  'execFileSync',
+]);
+const COMMAND_CLASSES = new Set(['node', 'git', 'shell', 'rg', 'other']);
+const PROCESS_RECORD_LIMIT = 64;
+
+function commandClass(file) {
+  if (typeof file !== 'string') return 'other';
+  const name = file
+    .split(/[\\/]/)
+    .at(-1)
+    .toLowerCase()
+    .replace(/\.exe$/, '');
+  if (name === 'node' || name === 'git' || name === 'rg') return name;
+  return ['cmd', 'powershell', 'pwsh', 'sh', 'bash', 'dash'].includes(name)
+    ? 'shell'
+    : 'other';
+}
+
+// Used only by the opt-in preload in the CLI child. Never retain command text,
+// arguments, environment, output, or error objects in the timing records.
+export function instrumentStartupProcesses({
+  builtin = childProcess,
+  syncExports = syncBuiltinESMExports,
+  now = () => performance.now(),
+  processStartMs = 0,
+} = {}) {
+  const records = [];
+  const hooks = [];
+  const listeners = new Map();
+  let boundary;
+
+  const begin = (api, file) => {
+    if (boundary !== undefined || records.length >= PROCESS_RECORD_LIMIT)
+      return;
+    const record = { api, commandClass: commandClass(file), start: now() };
+    records.push(record);
+    return record;
+  };
+
+  const hook = (owner, name, asynchronous) => {
+    const original = owner[name];
+    const wrapped = function (...args) {
+      let file = name === 'execSync' ? 'cmd' : args[0];
+      if (asynchronous) {
+        // Avoid evaluating an options getter a second time for classification.
+        try {
+          file = Object.getOwnPropertyDescriptor(args[0], 'file')?.value;
+        } catch {
+          file = undefined;
+        }
+      }
+      const record = begin(name, file);
+      let returned = false;
+      try {
+        const result = Reflect.apply(original, this, args);
+        returned = true;
+        return result;
+      } finally {
+        if (record) {
+          record.callEnd = now();
+          record.threw = !returned;
+          if (!asynchronous || !returned) {
+            record.end = record.callEnd;
+          } else {
+            const closed = () => {
+              record.end = now();
+              listeners.delete(record);
+            };
+            // A close listener does not suppress unhandled error events.
+            listeners.set(record, { child: this, closed });
+            try {
+              this.once('close', closed);
+            } catch {
+              // A host may override EventEmitter methods. Timing is optional.
+            }
+          }
+        }
+      }
+    };
+    owner[name] = wrapped;
+    hooks.push({ owner, name, original, wrapped });
+  };
+
+  const restore = () => {
+    for (const { owner, name, original, wrapped } of hooks) {
+      try {
+        if (owner[name] === wrapped) owner[name] = original;
+      } catch {
+        // A host can protect a builtin after instrumentation was installed.
+      }
+    }
+    try {
+      syncExports();
+    } catch {
+      // Continue removing listeners even if named exports cannot be refreshed.
+    }
+    for (const { child, closed } of listeners.values()) {
+      try {
+        child.removeListener('close', closed);
+      } catch {
+        // Best effort on hosts that override EventEmitter methods.
+      }
+    }
+    listeners.clear();
+  };
+
+  try {
+    hook(builtin.ChildProcess.prototype, 'spawn', true);
+    for (const name of ['spawnSync', 'execSync', 'execFileSync']) {
+      hook(builtin, name, false);
+    }
+    syncExports();
+  } catch {
+    // A report must not prevent startup if a host has protected its builtins.
+    try {
+      restore();
+    } catch {
+      // Best effort only; installed hooks become inert at this boundary.
+    }
+    boundary = now();
+  }
+
+  return {
+    stop(end = now()) {
+      if (boundary !== undefined) return;
+      boundary = end;
+      try {
+        restore();
+      } catch {
+        // Reporting must not change application behavior on a protected host.
+      }
+    },
+    snapshot() {
+      const end = boundary ?? now();
+      return records
+        .filter((record) => record.start <= end)
+        .map((record) => ({
+          api: record.api,
+          commandClass: record.commandClass,
+          startMs: milliseconds(processStartMs + record.start),
+          callMs: milliseconds(
+            Math.max(0, Math.min(record.callEnd ?? end, end) - record.start),
+          ),
+          durationMs: milliseconds(
+            Math.max(0, Math.min(record.end ?? end, end) - record.start),
+          ),
+          completed: record.end !== undefined && record.end <= end,
+          threw: Boolean(record.threw),
+        }));
+    },
+  };
+}
 
 export function getProcessLabel(entrypoint, npmEntrypoint, root) {
   if (!entrypoint) return undefined;
@@ -168,6 +327,45 @@ export function summarizeProfiles(profiles) {
         processStartMs: profile.processStartMs,
         phases,
       };
+      if (
+        profile.entrypoint === 'cli' &&
+        Array.isArray(profile.startupProcesses)
+      ) {
+        result.startupProcesses = profile.startupProcesses
+          .filter(
+            (record) =>
+              record &&
+              PROCESS_APIS.has(record.api) &&
+              COMMAND_CLASSES.has(record.commandClass) &&
+              Number.isFinite(record.startMs) &&
+              Number.isFinite(record.callMs) &&
+              record.callMs >= 0 &&
+              Number.isFinite(record.durationMs) &&
+              record.durationMs >= record.callMs &&
+              typeof record.completed === 'boolean' &&
+              typeof record.threw === 'boolean',
+          )
+          .slice(0, PROCESS_RECORD_LIMIT)
+          .map(
+            ({
+              api,
+              commandClass,
+              startMs,
+              callMs,
+              durationMs,
+              completed,
+              threw,
+            }) => ({
+              api,
+              commandClass,
+              startMs,
+              callMs,
+              durationMs,
+              completed,
+              threw,
+            }),
+          );
+      }
       // Only these processes finish as part of startup. Launcher and CLI
       // lifetimes also include interactive testing and must not be used here.
       if (
@@ -216,6 +414,22 @@ const entrypoint = root
 if (isMainThread && directory && Number.isFinite(launchTime) && entrypoint) {
   const processStartMs = performance.timeOrigin - launchTime;
   const collector = createPhaseCollector(processStartMs);
+  const isCliMain =
+    entrypoint === 'cli' &&
+    (process.env['GEMINI_CLI_NO_RELAUNCH'] || process.env['SANDBOX']);
+  const processCollector = isCliMain
+    ? instrumentStartupProcesses({ processStartMs })
+    : undefined;
+  const finishProcessCollection = () => {
+    const startup = collector
+      .snapshot()
+      .find(({ name }) => name === 'cli_startup');
+    if (startup) {
+      processCollector?.stop(
+        startup.startMs + startup.durationMs - processStartMs,
+      );
+    }
+  };
   const target = join(directory, `process-${process.pid}.json`);
   let scheduled;
   let disabled = false;
@@ -230,6 +444,7 @@ if (isMainThread && directory && Number.isFinite(launchTime) && entrypoint) {
       processStartMs: milliseconds(processStartMs),
       phases: collector.snapshot(),
     };
+    if (processCollector) record.startupProcesses = processCollector.snapshot();
     if (SHORT_LIVED_HELPERS.has(entrypoint) && helperDurationMs !== undefined) {
       record.helperDurationMs = milliseconds(helperDurationMs);
     }
@@ -246,12 +461,10 @@ if (isMainThread && directory && Number.isFinite(launchTime) && entrypoint) {
 
   // Helpers do not emit StartupProfiler marks. Avoid observers in npm, shell
   // wrappers, probes, and the CLI supervisor before heavy imports reach main.
-  const isCliMain =
-    entrypoint === 'cli' &&
-    (process.env['GEMINI_CLI_NO_RELAUNCH'] || process.env['SANDBOX']);
   const observer = isCliMain
     ? new PerformanceObserver((list) => {
         if (!collector.collect(list.getEntries())) return;
+        finishProcessCollection();
         clearTimeout(scheduled);
         scheduled = undefined;
         // Keep report I/O outside measured initialization phases. Completed
@@ -280,6 +493,8 @@ if (isMainThread && directory && Number.isFinite(launchTime) && entrypoint) {
       collector.collect(observer.takeRecords());
       observer.disconnect();
     }
+    finishProcessCollection();
+    processCollector?.stop();
     snapshot(helperDurationMs);
   });
 }

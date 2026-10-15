@@ -125,6 +125,7 @@ function processProbe(command, args, options, timeoutMs) {
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
     });
+    const spawnCallMs = milliseconds(start);
     let output = '';
     let timedOut = false;
     let failure;
@@ -132,10 +133,13 @@ function processProbe(command, args, options, timeoutMs) {
       // Only git --version is retained in the report. Never retain a Git root.
       if (args[0] === '--version' && output.length < 256) output += chunk;
     });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGKILL');
-    }, timeoutMs);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      },
+      Math.max(0, timeoutMs - milliseconds(start)),
+    );
     child.once('error', (error) => {
       failure = errorCode(error);
     });
@@ -143,6 +147,7 @@ function processProbe(command, args, options, timeoutMs) {
       clearTimeout(timer);
       resolveResult({
         elapsedMs: milliseconds(start),
+        spawnCallMs,
         status: timedOut ? 'timeout' : failure || code !== 0 ? 'error' : 'ok',
         exitCode: code,
         ...(signal ? { signal } : {}),
@@ -158,6 +163,7 @@ function processProbe(command, args, options, timeoutMs) {
 
 async function pathProbes(options, timeoutMs, progress) {
   return new Promise((resolveResult) => {
+    const launchStart = performance.now();
     const child = fork(script, ['--path-worker', JSON.stringify(options)], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       windowsHide: true,
@@ -171,7 +177,10 @@ async function pathProbes(options, timeoutMs, progress) {
       reason = value;
       child.kill('SIGKILL');
     };
-    const totalTimer = setTimeout(() => stop('total_timeout'), timeoutMs);
+    const totalTimer = setTimeout(
+      () => stop('total_timeout'),
+      Math.max(0, timeoutMs - milliseconds(launchStart)),
+    );
     child.on('message', (message) => {
       if (message.type === 'begin') {
         active = message.probe;
