@@ -112,6 +112,24 @@ The profiler writes timing and process metadata locally. It doesn't record
 prompts, terminal output, command arguments, environment values, or phase
 details, and it doesn't enable telemetry or debugger pauses.
 
+CLI reports also contain up to 64 `startupProcesses` entries for subprocess API
+calls before the `cli_startup` boundary. Each entry contains a fixed API name,
+an executable class (`node`, `git`, `shell`, `rg`, or `other`), and timings:
+
+- `startMs` uses the same launch clock as the startup phases.
+- `callMs` measures synchronous time inside the intercepted API. For async
+  `spawn`, this is the underlying spawn call, excluding outer argument setup.
+  For sync APIs, it includes waiting for the child to finish.
+- `durationMs` extends through the observed close event or startup boundary.
+  `completed: false` means closure wasn't observed before that boundary.
+- `threw` records whether the API call threw, without storing the error.
+
+The opt-in preload restores the process APIs at the startup boundary. It never
+records command arguments, executable paths, environment values, or output.
+Compare call intervals with delayed warning phases: a pending filesystem promise
+can include time when another operation blocks JavaScript callback delivery. Its
+phase duration alone doesn't establish slow filesystem I/O.
+
 ### Inspect Windows filesystem and launch costs
 
 If a startup phase is unusually slow, run this diagnostic from PowerShell in the
@@ -128,12 +146,19 @@ Filesystem timings run inside one child process to separate them from Node
 launch time. Two rounds reverse probe order to help expose order effects.
 Progress goes to stderr, and the JSON report goes to stdout.
 
+For process probes, `spawnCallMs` measures the public spawn API call, while
+`elapsedMs` includes the observed child lifetime. A long async spawn call can
+block JavaScript even though the child is launched through an async API.
+
 By default, each operation has a 60-second timeout, and the whole diagnostic has
 a five-minute timeout. A timeout stops the filesystem worker and retains partial
 results. Use `--samples`, `--operation-timeout-ms`, or `--total-timeout-ms` to
 adjust these settings. Check individual `status` fields for errors and timeouts;
 `complete` indicates whether all planned samples finished, not whether they
 succeeded.
+
+Timeouts run on JavaScript's event loop. A blocked process-creation call can
+delay their delivery, so the configured timeout isn't a hard wall-clock bound.
 
 The report contains versions, timings, fixed method and target labels, error
 codes, and path-text comparison booleans. It omits path strings, environment

@@ -24,6 +24,8 @@ import {
   summarizeProfiles,
 } from '../startup-profile.js';
 import { getPreloadOption, runStartupProfile } from '../profile-startup.js';
+import { instrumentStartupProcesses } from '../startup-profile-preload.js';
+import { EventEmitter } from 'node:events';
 
 vi.unmock('fs');
 vi.unmock('node:fs');
@@ -228,6 +230,246 @@ describe('startup timing collection', () => {
       getProcessLabel('/private/start.js', '', projectRoot),
     ).toBeUndefined();
     expect(getProcessLabel('/private/mcp.js', '', projectRoot)).toBeUndefined();
+  });
+});
+
+describe('startup subprocess timing', () => {
+  const fixture = () => {
+    let time = 10;
+    const result = {};
+    class Child extends EventEmitter {
+      spawn() {
+        time += 30;
+        return result;
+      }
+    }
+    const original = Child.prototype.spawn;
+    const synchronous = vi.fn(function () {
+      time += 20;
+      return result;
+    });
+    const builtin = {
+      ChildProcess: Child,
+      spawnSync: synchronous,
+      execSync: synchronous,
+      execFileSync: synchronous,
+    };
+    const syncExports = vi.fn();
+    const collector = instrumentStartupProcesses({
+      builtin,
+      syncExports,
+      now: () => time,
+      processStartMs: 100,
+    });
+    return {
+      builtin,
+      collector,
+      original,
+      synchronous,
+      syncExports,
+      result,
+      setTime: (value) => {
+        time = value;
+      },
+    };
+  };
+
+  it('separates an asynchronous spawn call from child lifetime without storing command data', () => {
+    const { builtin, collector, setTime, result } = fixture();
+    const child = new builtin.ChildProcess();
+    expect(
+      child.spawn({
+        file: 'C:\\private workspace\\git.exe',
+        args: ['private prompt'],
+        env: { TOKEN: 'private token' },
+      }),
+    ).toBe(result);
+    expect(child.listenerCount('error')).toBe(0);
+    setTime(100);
+    child.emit('close', 0);
+    collector.stop(120);
+    expect(collector.snapshot()).toEqual([
+      {
+        api: 'spawn',
+        commandClass: 'git',
+        startMs: 110,
+        callMs: 30,
+        durationMs: 90,
+        completed: true,
+        threw: false,
+      },
+    ]);
+    expect(JSON.stringify(collector.snapshot())).not.toContain('private');
+  });
+
+  it('preserves synchronous return values and receivers, then restores every method', () => {
+    const { builtin, collector, original, synchronous, syncExports, result } =
+      fixture();
+    for (const api of ['spawnSync', 'execSync', 'execFileSync']) {
+      expect(builtin[api]('private executable', ['private argument'])).toBe(
+        result,
+      );
+    }
+    expect(synchronous.mock.instances).toEqual([builtin, builtin, builtin]);
+    collector.stop();
+    expect(builtin.ChildProcess.prototype.spawn).toBe(original);
+    for (const api of ['spawnSync', 'execSync', 'execFileSync']) {
+      expect(builtin[api]).toBe(synchronous);
+    }
+    expect(syncExports).toHaveBeenCalledTimes(2);
+    expect(
+      collector.snapshot().map(({ callMs, durationMs, completed }) => ({
+        callMs,
+        durationMs,
+        completed,
+      })),
+    ).toEqual(
+      Array(3).fill({
+        callMs: 20,
+        durationMs: 20,
+        completed: true,
+      }),
+    );
+  });
+
+  it('preserves the original exception object without storing its text', () => {
+    const error = new Error('private error');
+    const original = () => {
+      throw error;
+    };
+    const builtin = {
+      ChildProcess: class {
+        spawn = original;
+      },
+      spawnSync: original,
+      execSync: original,
+      execFileSync: original,
+    };
+    const collector = instrumentStartupProcesses({ builtin, syncExports() {} });
+    try {
+      builtin.execSync('private command');
+      throw new Error('Expected original error');
+    } catch (caught) {
+      expect(caught).toBe(error);
+    }
+    collector.stop();
+    expect(collector.snapshot()[0].threw).toBe(true);
+    expect(JSON.stringify(collector.snapshot())).not.toContain('private');
+  });
+
+  it('bounds records and excludes calls and child lifetime beyond the actual startup boundary', () => {
+    const { builtin, collector, setTime } = fixture();
+    const first = new builtin.ChildProcess();
+    first.spawn({ file: '/private/node' });
+    setTime(70);
+    const late = new builtin.ChildProcess();
+    late.spawn({ file: '/private/rg' });
+    first.emit('close', 0);
+    collector.stop(50);
+    expect(first.listenerCount('close')).toBe(0);
+    expect(late.listenerCount('close')).toBe(0);
+    expect(collector.snapshot()).toEqual([
+      {
+        api: 'spawn',
+        commandClass: 'node',
+        startMs: 110,
+        callMs: 30,
+        durationMs: 40,
+        completed: false,
+        threw: false,
+      },
+    ]);
+    setTime(1_000_000);
+    late.emit('close', 0);
+    expect(collector.snapshot()[0].durationMs).toBe(40);
+
+    const bounded = fixture();
+    const children = Array.from({ length: 70 }, () => {
+      const child = new bounded.builtin.ChildProcess();
+      child.spawn({ file: '/private/git' });
+      return child;
+    });
+    bounded.collector.stop();
+    expect(bounded.collector.snapshot()).toHaveLength(64);
+    expect(children.every((child) => child.listenerCount('close') === 0)).toBe(
+      true,
+    );
+  });
+
+  it('does not evaluate command getters for classification or suppress unhandled errors', () => {
+    const { builtin, collector } = fixture();
+    const child = new builtin.ChildProcess();
+    const getter = vi.fn(() => {
+      throw new Error('private getter');
+    });
+    child.spawn(Object.defineProperty({}, 'file', { get: getter }));
+    expect(getter).not.toHaveBeenCalled();
+    const error = new Error('private child error');
+    expect(() => child.emit('error', error)).toThrow(error);
+    collector.stop();
+    expect(collector.snapshot()[0].commandClass).toBe('other');
+  });
+
+  it('preserves successful calls if optional listener registration fails', () => {
+    const { builtin, collector, result } = fixture();
+    const child = new builtin.ChildProcess();
+    child.once = () => {
+      throw new Error('private listener override');
+    };
+    expect(child.spawn({ file: '/private/git' })).toBe(result);
+    collector.stop();
+    expect(collector.snapshot()[0].completed).toBe(false);
+    expect(JSON.stringify(collector.snapshot())).not.toContain('private');
+  });
+
+  it('restores installed hooks if installation encounters a protected builtin', () => {
+    class Child extends EventEmitter {
+      spawn() {}
+    }
+    const original = Child.prototype.spawn;
+    const builtin = Object.freeze({
+      ChildProcess: Child,
+      spawnSync() {},
+      execSync() {},
+      execFileSync() {},
+    });
+    const collector = instrumentStartupProcesses({ builtin, syncExports() {} });
+    collector.stop();
+    expect(Child.prototype.spawn).toBe(original);
+    expect(collector.snapshot()).toEqual([]);
+  });
+
+  it('projects only fixed subprocess classes and numeric timing fields into summaries', () => {
+    const valid = {
+      api: 'spawn',
+      commandClass: 'git',
+      startMs: 10,
+      callMs: 20,
+      durationMs: 30,
+      completed: true,
+      threw: false,
+      argv: ['private argument'],
+      error: 'private error',
+    };
+    const summary = summarizeProfiles([
+      {
+        schemaVersion: 1,
+        pid: 1,
+        ppid: 0,
+        entrypoint: 'cli',
+        processStartMs: 0,
+        phases: [],
+        startupProcesses: [
+          null,
+          { ...valid, api: 'private api' },
+          { ...valid, commandClass: 'private executable' },
+          { ...valid, callMs: -1 },
+          ...Array(70).fill(valid),
+        ],
+      },
+    ]);
+    expect(summary.processes[0].startupProcesses).toHaveLength(64);
+    expect(JSON.stringify(summary)).not.toContain('private');
   });
 });
 
@@ -504,6 +746,70 @@ describe('npm start profiling wrapper', () => {
     expect(record.phases).toEqual([]);
     expect(JSON.stringify(record)).not.toContain('private');
     expect(record).not.toHaveProperty('sessionDurationMs');
+  });
+
+  it('instruments named sync imports and async children only through startup', () => {
+    const fixture = join(temporary, 'subprocess-cli');
+    const cli = join(fixture, 'packages', 'cli', 'dist', 'index.js');
+    const directory = join(fixture, 'reports');
+    mkdirSync(join(fixture, 'packages', 'cli', 'dist'), { recursive: true });
+    mkdirSync(directory);
+    writeFileSync(join(fixture, 'package.json'), '{"type":"module"}');
+    writeFileSync(
+      cli,
+      `
+      import { spawn, spawnSync, execFileSync } from 'node:child_process';
+      import { performance } from 'node:perf_hooks';
+      performance.mark('startup:cli_startup:start');
+      spawnSync(process.execPath, ['-e', 'process.exit(0)', 'private argument']);
+      execFileSync(process.execPath, ['-e', 'process.exit(0)', 'private argument']);
+      const completed = spawn(process.execPath, ['-e', 'process.exit(0)']);
+      await new Promise((resolve) => completed.once('close', resolve));
+      const pending = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        stdio: 'ignore',
+      });
+      const pendingClosed = new Promise((resolve) => pending.once('close', resolve));
+      performance.mark('startup:cli_startup:end');
+      performance.measure('cli_startup', 'startup:cli_startup:start', 'startup:cli_startup:end');
+      await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+      spawnSync(process.execPath, ['-e', 'process.exit(0)', 'private later argument']);
+      pending.kill();
+      await pendingClosed;
+    `,
+    );
+    const result = spawnSync(process.execPath, [cli], {
+      env: {
+        ...process.env,
+        NODE_OPTIONS: getPreloadOption(preload),
+        GEMINI_STARTUP_PROFILE_ROOT: fixture,
+        GEMINI_STARTUP_PROFILE_RUN_DIR: directory,
+        GEMINI_STARTUP_PROFILE_LAUNCH_TIME: String(Date.now()),
+        GEMINI_CLI_NO_RELAUNCH: 'true',
+      },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr.toString()).toBe('');
+    const record = JSON.parse(
+      readFileSync(join(directory, readdirSync(directory)[0]), 'utf8'),
+    );
+    expect(record.startupProcesses.map(({ api }) => api)).toEqual([
+      'spawnSync',
+      'execFileSync',
+      'spawn',
+      'spawn',
+    ]);
+    expect(
+      record.startupProcesses.every(
+        ({ commandClass }) => commandClass === 'node',
+      ),
+    ).toBe(true);
+    expect(record.startupProcesses.map(({ completed }) => completed)).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    expect(JSON.stringify(record)).not.toContain('private');
   });
 
   it('buffers completed phases until initialization finishes and flushes failures on exit', () => {
