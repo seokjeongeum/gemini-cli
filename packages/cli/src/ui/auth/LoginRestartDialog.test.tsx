@@ -103,8 +103,11 @@ describe('LoginRestartDialog', () => {
       // Advance timers to trigger the setTimeout callback
       await vi.runAllTimersAsync();
 
-      expect(mockedRunExitCleanup).toHaveBeenCalledTimes(1);
-      expect(exitSpy).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+      // The timer starts relaunch; dynamic imports and cleanup finish later.
+      await vi.waitFor(() => {
+        expect(mockedRunExitCleanup).toHaveBeenCalledTimes(1);
+        expect(exitSpy).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+      });
 
       vi.useRealTimers();
       unmount();

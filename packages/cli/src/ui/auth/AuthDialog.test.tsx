@@ -489,8 +489,12 @@ describe('AuthDialog', () => {
         await vi.runAllTimersAsync();
       });
 
-      expect(mockedRunExitCleanup).toHaveBeenCalled();
-      expect(exitSpy).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+      // Relaunch waits for dynamically imported cleanup/update modules. The
+      // timer firing alone does not mean the asynchronous relaunch has ended.
+      await vi.waitFor(() => {
+        expect(mockedRunExitCleanup).toHaveBeenCalled();
+        expect(exitSpy).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+      });
 
       exitSpy.mockRestore();
       logSpy.mockRestore();
