@@ -76,6 +76,7 @@ import { requestConsentNonInteractive } from './extensions/consent.js';
 import { promptForSetting } from './extensions/extensionSettings.js';
 import type { EventEmitter } from 'node:stream';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { canSkipWorktreeDiscovery } from './worktreeDetection.js';
 
 export interface CliArgs {
   query: string | undefined;
@@ -1159,6 +1160,10 @@ function mergeExcludeTools(
 async function resolveWorktreeSettings(
   cwd: string,
 ): Promise<WorktreeSettings | undefined> {
+  if (canSkipWorktreeDiscovery(cwd)) {
+    return undefined;
+  }
+
   let worktreePath: string | undefined;
   try {
     const gitToplevelHandle = startupProfiler.start('worktree_git_toplevel');

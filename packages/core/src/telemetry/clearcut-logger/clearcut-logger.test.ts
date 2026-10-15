@@ -136,6 +136,8 @@ vi.mock('node:os', async (importOriginal) => {
   return {
     ...actual,
     cpus: vi.fn(() => [{ model: 'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz' }]),
+    // These tests exercise the systeminformation-backed telemetry path.
+    platform: vi.fn(() => 'linux'),
     availableParallelism: vi.fn(() => 8),
     totalmem: vi.fn(() => 32 * 1024 * 1024 * 1024),
   };
