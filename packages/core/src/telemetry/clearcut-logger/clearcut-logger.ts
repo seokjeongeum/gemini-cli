@@ -272,13 +272,22 @@ async function getWindowsGpuInfo(): Promise<string> {
   // scanning driver directories, or invoking vendor-specific utilities.
   const command =
     "$ErrorActionPreference = 'Stop'; " +
-    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); ' +
-    'ConvertTo-Json -Compress -InputObject @(' +
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
+    '$names = @(' +
     'Get-CimInstance -ClassName Win32_VideoController -Property Name | ' +
-    'Select-Object -ExpandProperty Name)';
+    'Select-Object -ExpandProperty Name); ' +
+    '[Console]::Write((ConvertTo-Json -Compress -InputObject $names))';
   const { stdout } = await execFileAsync(
     getWindowsPowerShellPath(),
-    ['-NoProfile', '-NonInteractive', '-Command', command],
+    // A raw -Command argument can become a quoted string expression when
+    // Windows joins the argument list. EncodedCommand accepts UTF-16LE source
+    // without relying on PowerShell's handling of those command-line quotes.
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      Buffer.from(command, 'utf16le').toString('base64'),
+    ],
     {
       encoding: 'utf8',
       windowsHide: true,
@@ -286,7 +295,11 @@ async function getWindowsGpuInfo(): Promise<string> {
       maxBuffer: 64 * 1024,
     },
   );
-  const result: unknown = JSON.parse(stdout);
+  const output = stdout.trim();
+  if (!output) {
+    throw new Error('GPU controller query returned no output.');
+  }
+  const result: unknown = JSON.parse(output);
   const names = Array.isArray(result) ? result : [result];
   if (!names.every((name): name is string => typeof name === 'string')) {
     throw new Error('Invalid GPU controller names.');
@@ -311,7 +324,7 @@ async function refreshGpuInfo(): Promise<void> {
     }
   } catch (error) {
     cachedGpuInfo = 'FAILED';
-    debugLogger.error(
+    debugLogger.debug(
       'Failed to get GPU information for telemetry',
       getErrorMessage(error),
     );
