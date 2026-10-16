@@ -67,6 +67,27 @@ describe('policyHelpers', () => {
       expect(chain[0]?.model).toBe('custom-model');
     });
 
+    it.each([false, true])(
+      'does not wrap manually selected Gemini 3 or Argon with dynamic=%s',
+      (dynamic) => {
+        for (const model of [
+          'gemini-3-pro-preview',
+          'gemini-3-flash-preview',
+          'gemini-4-argon',
+        ]) {
+          const config = createMockConfig({
+            getModel: () => model,
+            getExperimentalDynamicModelConfiguration: () => dynamic,
+          });
+          expect(
+            resolvePolicyChain(config, model, true).map(
+              (policy) => policy.model,
+            ),
+          ).toEqual([model]);
+        }
+      },
+    );
+
     it('leaves catalog order untouched when active model already present', () => {
       const config = createMockConfig({
         getModel: () => 'gemini-2.5-pro',
@@ -87,14 +108,13 @@ describe('policyHelpers', () => {
       expect(chain[1]?.model).toBe(BASE_GEMINI_FLASH_MODEL);
     });
 
-    it('uses auto chain when preferred model is auto', () => {
+    it('does not enable Auto fallback when a caller prefers Auto but the configured selection is manual', () => {
       const config = createMockConfig({
         getModel: () => 'gemini-2.5-pro',
       });
       const chain = resolvePolicyChain(config, DEFAULT_GEMINI_MODEL_AUTO);
-      expect(chain).toHaveLength(2);
+      expect(chain).toHaveLength(1);
       expect(chain[0]?.model).toBe('gemini-2.5-pro');
-      expect(chain[1]?.model).toBe(BASE_GEMINI_FLASH_MODEL);
     });
 
     it('uses auto chain when configured model is auto even if preferred is concrete', () => {
@@ -128,15 +148,13 @@ describe('policyHelpers', () => {
       expect(chain[2]?.model).toBe('gemini-2.5-pro');
     });
 
-    it('returns flash-lite chain when configured model is flash-lite', () => {
+    it('keeps a manually selected flash-lite model in a single-model chain', () => {
       const config = createMockConfig({
         getModel: () => DEFAULT_GEMINI_FLASH_LITE_MODEL,
       });
       const chain = resolvePolicyChain(config);
-      expect(chain).toHaveLength(3);
+      expect(chain).toHaveLength(1);
       expect(chain[0]?.model).toBe('gemini-3.1-flash-lite');
-      expect(chain[1]?.model).toBe(BASE_GEMINI_FLASH_MODEL);
-      expect(chain[2]?.model).toBe('gemini-2.5-pro');
     });
 
     it('wraps around the chain when wrapsAround is true', () => {
@@ -298,6 +316,7 @@ describe('policyHelpers', () => {
     const mockAvailabilityService = {
       selectFirstAvailable: vi.fn(),
       consumeStickyAttempt: vi.fn(),
+      snapshot: vi.fn(() => ({ available: true })),
     };
 
     const createExtendedMockConfig = (
@@ -308,7 +327,11 @@ describe('policyHelpers', () => {
         setActiveModel: vi.fn(),
         modelConfigService: mockModelConfigService,
       };
-      return createMockConfig({ ...defaults, ...overrides } as Partial<Config>);
+      return createMockConfig({
+        getModel: () => DEFAULT_GEMINI_MODEL_AUTO,
+        ...defaults,
+        ...overrides,
+      } as Partial<Config>);
     };
 
     beforeEach(() => {
@@ -332,6 +355,32 @@ describe('policyHelpers', () => {
       expect(result.model).toBe('gemini-pro');
       expect(result.maxAttempts).toBeUndefined();
       expect(config.setActiveModel).toHaveBeenCalledWith('gemini-pro');
+    });
+
+    it('does not use the availability default or last-resort model for manual selection', () => {
+      const config = createExtendedMockConfig({
+        getModel: () => 'gemini-3-pro-preview',
+      });
+      mockModelConfigService.getResolvedConfig.mockReturnValue({
+        model: 'gemini-3-pro-preview',
+        generateContentConfig: {},
+      });
+      mockAvailabilityService.selectFirstAvailable.mockReturnValue({
+        selectedModel: null,
+        skipped: [],
+      });
+
+      const result = applyModelSelection(config, {
+        model: 'gemini-3-pro-preview',
+        isChatModel: true,
+      });
+      expect(result.model).toBe('gemini-3-pro-preview');
+      expect(
+        mockAvailabilityService.selectFirstAvailable,
+      ).not.toHaveBeenCalled();
+      expect(config.setActiveModel).toHaveBeenCalledWith(
+        'gemini-3-pro-preview',
+      );
     });
 
     it('switches to backup model and updates config if requested is unavailable', () => {
