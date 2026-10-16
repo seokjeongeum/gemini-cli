@@ -35,6 +35,7 @@ import {
   applyModelSelection,
   createAvailabilityContextProvider,
 } from '../availability/policyHelpers.js';
+import { canUseQuotaFallback } from '../availability/quotaFallback.js';
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 
@@ -358,6 +359,35 @@ export class BaseLlmClient {
         maxAttempts:
           availabilityMaxAttempts ?? maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         getAvailabilityContext,
+        onQuotaExhausted: canUseQuotaFallback(this.config, currentModel)
+          ? async (authType, error) => {
+              if (!canUseQuotaFallback(this.config, currentModel)) return null;
+              const fallback = await handleFallback(
+                this.config,
+                currentModel,
+                authType,
+                error,
+              );
+              if (typeof fallback === 'string') {
+                const resolved =
+                  this.config.modelConfigService.getResolvedConfig({
+                    ...modelConfigKey,
+                    model: fallback,
+                  });
+                if (
+                  resolved.model === currentModel ||
+                  this.config
+                    .getModelAvailabilityService()
+                    .snapshot(resolved.model).reason === 'quota'
+                ) {
+                  return null;
+                }
+                currentModel = resolved.model;
+                currentGenerateContentConfig = resolved.generateContentConfig;
+              }
+              return fallback;
+            }
+          : undefined,
         onPersistent429: this.config.isInteractive()
           ? (authType, error) =>
               handleFallback(this.config, currentModel, authType, error)

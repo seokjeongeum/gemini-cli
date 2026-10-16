@@ -71,6 +71,32 @@ export class RetryableQuotaError extends Error {
   }
 }
 
+/** Hard model quota exhaustion, excluding rate limits, capacity, and credits. */
+export function isQuotaExhaustedError(
+  error: unknown,
+): error is TerminalQuotaError {
+  return (
+    error instanceof TerminalQuotaError &&
+    (error.status === undefined || error.status < 500) &&
+    !error.isInsufficientCredits &&
+    error.reason !== 'RATE_LIMIT_EXCEEDED' &&
+    error.reason !== 'MODEL_CAPACITY_EXHAUSTED' &&
+    error.reason !== 'MODEL_CAPACITY_EXCEEDED' &&
+    !/exhausted your capacity|capacity exceeded|MODEL_CAPACITY_EXHAUSTED/i.test(
+      error.message,
+    ) &&
+    !error.cause?.details?.some(
+      (detail) =>
+        (detail['@type'] === 'type.googleapis.com/google.rpc.ErrorInfo' &&
+          detail.reason === 'RATE_LIMIT_EXCEEDED') ||
+        (detail['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure' &&
+          detail.violations.some((violation) =>
+            violation.quotaId?.includes('PerMinute'),
+          )),
+    )
+  );
+}
+
 /**
  * An error indicating that user validation is required to continue.
  */
