@@ -638,6 +638,7 @@ describe('BaseLlmClient', () => {
 
       // Reflect setActiveModel into getActiveModel so availability-driven updates
       // are visible to the client under test.
+      mockConfig.getModel.mockReturnValue('auto');
       mockConfig.getActiveModel = vi.fn().mockReturnValue('test-model');
       mockConfig.setActiveModel = vi.fn((model: string) => {
         vi.mocked(mockConfig.getActiveModel).mockReturnValue(model);

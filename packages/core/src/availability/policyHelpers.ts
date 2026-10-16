@@ -33,6 +33,11 @@ import { normalizeModelId } from '../utils/modelUtils.js';
 import type { ModelSelectionResult } from './modelAvailabilityService.js';
 import type { ModelConfigKey } from '../services/modelConfigService.js';
 import { ApprovalMode } from '../policy/types.js';
+import {
+  selectQuotaFallbackModel,
+  hasZeroQuotaForModel,
+} from './quotaFallback.js';
+import { TerminalQuotaError } from '../utils/googleQuotaErrors.js';
 
 /**
  * Resolves the active policy chain for the given config, ensuring the
@@ -77,13 +82,14 @@ export function resolvePolicyChain(
     : false;
   const isAutoConfigured = isAutoModel(configuredModel, config);
 
-  // We always wrap around for Gemini 3 chains to ensure maximum availability
-  // between models in the same family (e.g. fallback to Pro if Flash is exhausted).
+  // Only the configured Auto selection permits switching between model tiers.
   const effectiveWrapsAround =
-    wrapsAround || isAutoPreferred || isAutoConfigured || isOriginallyGemini3;
+    wrapsAround || isAutoPreferred || isAutoConfigured;
 
   // --- DYNAMIC PATH ---
-  if (config.getExperimentalDynamicModelConfiguration?.() === true) {
+  if (!isAutoConfigured) {
+    chain = createSingleModelChain(resolvedModel);
+  } else if (config.getExperimentalDynamicModelConfiguration?.() === true) {
     const context = {
       useGemini3_1: useGemini31,
       useCustomTools: useCustomToolModel,
@@ -271,6 +277,28 @@ export function selectModelForAvailability(
   config: Config,
   requestedModel: string,
 ): ModelSelectionResult {
+  if (!isAutoModel(normalizeModelId(config.getModel()), config)) {
+    // Availability must never replace a manually selected chat or utility model.
+    return { selectedModel: requestedModel, skipped: [] };
+  }
+  const resolvedRequestedModel = resolveModel(
+    requestedModel,
+    config.getGemini31LaunchedSync?.() ?? false,
+    config.getUseCustomToolModelSync?.() ?? false,
+    config.getHasAccessToPreviewModel?.() ?? false,
+    config,
+    config.hasLatestFlashGAAccess?.() ?? false,
+    config.hasLatestFlashLiteGAAccess?.() ?? false,
+  );
+  if (
+    hasZeroQuotaForModel(config, resolvedRequestedModel) ||
+    config.getModelAvailabilityService?.()?.snapshot(resolvedRequestedModel)
+      .reason === 'quota'
+  ) {
+    const quotaSelection = selectQuotaFallbackModel(config, requestedModel);
+    if (quotaSelection) return quotaSelection;
+  }
+
   const chain = resolvePolicyChain(config, requestedModel);
   const selection = config
     .getModelAvailabilityService?.()
@@ -296,6 +324,12 @@ export function applyModelSelection(
   const resolved = config.modelConfigService.getResolvedConfig(modelConfigKey);
   const model = resolved.model;
   const selection = selectModelForAvailability(config, model);
+
+  if (selection.selectedModel === null) {
+    throw new TerminalQuotaError(
+      'No model with available quota remains for this selection.',
+    );
+  }
 
   if (!selection) {
     return { model, config: resolved.generateContentConfig };
@@ -333,6 +367,7 @@ export function applyModelSelection(
 export function applyAvailabilityTransition(
   getContext: (() => RetryAvailabilityContext | undefined) | undefined,
   failureKind: FailureKind,
+  terminalReason?: 'quota' | 'capacity',
 ): void {
   const context = getContext?.();
   if (!context) return;
@@ -343,7 +378,7 @@ export function applyAvailabilityTransition(
   if (transition === 'terminal') {
     context.service.markTerminal(
       context.policy.model,
-      failureKind === 'terminal' ? 'quota' : 'capacity',
+      terminalReason ?? (failureKind === 'terminal' ? 'quota' : 'capacity'),
     );
   } else if (transition === 'sticky_retry') {
     context.service.markRetryOncePerTurn(
