@@ -10,6 +10,7 @@ import {
   writeToStderr,
   type WorktreeInfo,
 } from '@google/gemini-cli-core';
+import { preserveWorktreeForRestart } from './worktreeRestart.js';
 
 /**
  * Sets up a git worktree for parallel sessions.
@@ -33,6 +34,7 @@ export async function setupWorktree(
 
     process.chdir(worktreeInfo.path);
     process.env['GEMINI_CLI_WORKTREE_HANDLED'] = '1';
+    await preserveWorktreeForRestart(worktreeInfo.path);
 
     return worktreeInfo;
   } catch (error) {

@@ -7,6 +7,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setupWorktree } from './worktreeSetup.js';
 import * as coreFunctions from '@google/gemini-cli-core';
+import { preserveWorktreeForRestart } from './worktreeRestart.js';
+
+vi.mock('./worktreeRestart.js', () => ({
+  preserveWorktreeForRestart: vi.fn().mockResolvedValue(undefined),
+}));
 
 // Mock dependencies
 vi.mock('@google/gemini-cli-core', async (importOriginal) => {
@@ -27,7 +32,6 @@ vi.mock('@google/gemini-cli-core', async (importOriginal) => {
 });
 
 describe('setupWorktree', () => {
-  const originalEnv = { ...process.env };
   const originalCwd = process.cwd;
 
   const mockService = {
@@ -37,7 +41,7 @@ describe('setupWorktree', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env = { ...originalEnv };
+    vi.stubEnv('GEMINI_CLI_WORKTREE_HANDLED', '');
 
     // Mock process.cwd and process.chdir
     let currentPath = '/mock/project';
@@ -61,7 +65,7 @@ describe('setupWorktree', () => {
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    vi.unstubAllEnvs();
     process.cwd = originalCwd;
     delete (process as { chdir?: typeof process.chdir }).chdir;
   });
@@ -95,12 +99,52 @@ describe('setupWorktree', () => {
   });
 
   it('should skip worktree creation if GEMINI_CLI_WORKTREE_HANDLED is set', async () => {
-    process.env['GEMINI_CLI_WORKTREE_HANDLED'] = '1';
+    vi.stubEnv('GEMINI_CLI_WORKTREE_HANDLED', '1');
 
     await setupWorktree('my-feature');
 
     expect(coreFunctions.createWorktreeService).not.toHaveBeenCalled();
     expect(process.chdir).not.toHaveBeenCalled();
+  });
+
+  it('waits for the supervisor before allowing authentication to continue', async () => {
+    let acknowledge: () => void = () => {};
+    vi.mocked(preserveWorktreeForRestart).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const settled = vi.fn();
+    const setup = setupWorktree(undefined).then(settled);
+    await vi.waitFor(() =>
+      expect(preserveWorktreeForRestart).toHaveBeenCalled(),
+    );
+    expect(process.chdir).toHaveBeenCalledWith(
+      '/mock/project/.gemini/worktrees/my-feature',
+    );
+    expect(settled).not.toHaveBeenCalled();
+    acknowledge();
+    await setup;
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('exits instead of starting a session when the supervisor cannot retain the worktree', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('PROCESS_EXIT');
+    });
+    vi.mocked(preserveWorktreeForRestart).mockRejectedValueOnce(
+      new Error('Timed out preserving worktree for CLI restart.'),
+    );
+    try {
+      await expect(setupWorktree(undefined)).rejects.toThrow('PROCESS_EXIT');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(coreFunctions.writeToStderr).toHaveBeenCalledWith(
+        expect.stringContaining('Timed out preserving worktree'),
+      );
+    } finally {
+      exit.mockRestore();
+    }
   });
 
   it('should handle errors gracefully and exit', async () => {

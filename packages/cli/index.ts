@@ -16,6 +16,7 @@ import {
   setupSignalForwarding,
   handleChildProcessClose,
 } from './src/utils/processUtils.js';
+import { WorktreeRestartState } from './src/utils/worktreeRestart.js';
 
 // --- Global Entry Point ---
 
@@ -63,13 +64,14 @@ async function run() {
     const { spawnArgs, env: newEnv } = getSpawnConfig(memoryArgs, scriptArgs);
 
     let latestAdminSettings: unknown = undefined;
+    const worktreeRestart = new WorktreeRestartState();
 
     const runner = () => {
       process.stdin.pause();
 
       const child = spawn(process.execPath, spawnArgs, {
         stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
-        env: newEnv,
+        ...worktreeRestart.getSpawnOptions(newEnv),
       });
 
       // Clear one-time auth override from supervisor environment after passing to child
@@ -83,6 +85,7 @@ async function run() {
       child.on(
         'message',
         (msg: { type?: string; settings?: unknown; authType?: string }) => {
+          worktreeRestart.handleMessage(child, msg);
           if (msg.type === 'admin-settings-update' && msg.settings) {
             latestAdminSettings = msg.settings;
           }

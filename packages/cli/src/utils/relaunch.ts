@@ -16,6 +16,7 @@ import {
   writeToStderr,
   type AdminControlsSettings,
 } from '@google/gemini-cli-core';
+import { WorktreeRestartState } from './worktreeRestart.js';
 
 export async function relaunchOnExitCode(runner: () => Promise<number>) {
   while (true) {
@@ -47,6 +48,7 @@ export async function relaunchAppInChildProcess(
   }
 
   let latestAdminSettings = remoteAdminSettings;
+  const worktreeRestart = new WorktreeRestartState();
 
   const runner = () => {
     const scriptArgs = getScriptArgs();
@@ -60,7 +62,7 @@ export async function relaunchAppInChildProcess(
 
     const child = spawn(process.execPath, spawnArgs, {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
-      env: newEnv,
+      ...worktreeRestart.getSpawnOptions(newEnv),
     });
 
     // Clear one-time auth override from supervisor environment after passing to child
@@ -74,6 +76,7 @@ export async function relaunchAppInChildProcess(
     child.on(
       'message',
       (msg: { type?: string; settings?: unknown; authType?: string }) => {
+        worktreeRestart.handleMessage(child, msg);
         if (msg.type === 'admin-settings-update' && msg.settings) {
           latestAdminSettings = msg.settings as AdminControlsSettings;
         }

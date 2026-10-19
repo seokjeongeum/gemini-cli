@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { resolve } from 'node:path';
 import { FORWARDED_SIGNALS, RELAUNCH_EXIT_CODE } from './processUtils.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -446,6 +447,80 @@ describe('relaunchAppInChildProcess', () => {
         expect(process.listenerCount(sig)).toBe(initialCounts.get(sig));
       }
     });
+
+    it.each(['named', 'generated'])(
+      'preserves a %s worktree through fast auth and subsequent restarts',
+      async (name) => {
+        const worktreePath = resolve(
+          'project with spaces',
+          '.gemini/worktrees',
+          name,
+        );
+        const remoteSettings = { strictMode: true };
+        const spawnOptions: Array<{ cwd?: string; env?: NodeJS.ProcessEnv }> =
+          [];
+        const children: ChildProcess[] = [];
+        vi.stubEnv('GEMINI_CLI_AUTH_OVERRIDE', '');
+        let count = 0;
+        mockedSpawn.mockImplementation((_file, _args, options) => {
+          count++;
+          const current = count;
+          const child = createMockChildProcess(0, false);
+          children.push(child);
+          spawnOptions.push({
+            cwd: options?.cwd?.toString(),
+            env: { ...options?.env },
+          });
+          setImmediate(() => {
+            if (current === 1) {
+              child.emit('message', {
+                type: 'worktree-selected',
+                path: worktreePath,
+              });
+              expect(child.send).toHaveBeenCalledWith(
+                { type: 'worktree-selected-ack', path: worktreePath },
+                expect.any(Function),
+              );
+              child.emit('message', {
+                type: 'admin-settings-update',
+                settings: remoteSettings,
+              });
+              child.emit('message', {
+                type: 'auth-selected-type',
+                authType: 'login_with_google',
+              });
+            }
+            child.emit('close', current < 3 ? RELAUNCH_EXIT_CODE : 0);
+          });
+          return child;
+        });
+
+        await expect(
+          relaunchAppInChildProcess(
+            [],
+            ['--worktree', ...(name === 'named' ? [name] : [])],
+          ),
+        ).rejects.toThrow('PROCESS_EXIT_CALLED');
+        expect(spawnOptions).toHaveLength(3);
+        expect(spawnOptions[0].cwd).toBeUndefined();
+        for (const options of spawnOptions.slice(1)) {
+          expect(options.cwd).toBe(worktreePath);
+          expect(options.env?.['GEMINI_CLI_WORKTREE_HANDLED']).toBe('1');
+        }
+        expect(spawnOptions[1].env?.['GEMINI_CLI_AUTH_OVERRIDE']).toBe(
+          'login_with_google',
+        );
+        expect(
+          spawnOptions[2].env?.['GEMINI_CLI_AUTH_OVERRIDE'],
+        ).toBeUndefined();
+        for (const child of children.slice(1)) {
+          expect(child.send).toHaveBeenCalledWith({
+            type: 'admin-settings',
+            settings: remoteSettings,
+          });
+        }
+      },
+    );
 
     it('should remove signal forwarders when child emits error', async () => {
       const initialSigtermCount = process.listenerCount('SIGTERM');
