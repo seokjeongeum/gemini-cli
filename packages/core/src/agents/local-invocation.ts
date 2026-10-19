@@ -282,6 +282,9 @@ export class LocalSubagentInvocation extends BaseToolInvocation<
       const output = await executor.run(this.params, signal);
 
       if (output.terminate_reason === AgentTerminateMode.ABORTED) {
+        if (!signal.aborted) {
+          throw new Error('Subagent stopped without an external cancellation.');
+        }
         const progress: SubagentProgress = {
           isSubagentProgress: true,
           agentName: this.definition.name,
@@ -327,9 +330,7 @@ ${output.result}`;
 
       debugLogger.error(`Subagent '${this.definition.name}' failed:`, error);
 
-      const isAbort =
-        (error instanceof Error && error.name === 'AbortError') ||
-        errorMessage.includes('Aborted');
+      const isAbort = signal.aborted;
 
       // Mark any running items as error/cancelled
       for (const item of recentActivity) {

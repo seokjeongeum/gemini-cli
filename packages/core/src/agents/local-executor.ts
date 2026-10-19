@@ -342,7 +342,7 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
     currentMessage: Content,
     turnCounter: number,
     combinedSignal: AbortSignal,
-    timeoutSignal: AbortSignal, // Pass the timeout controller's signal
+    externalSignal: AbortSignal,
     onWaitingForConfirmation?: (waiting: boolean) => void,
   ): Promise<AgentTurnResult> {
     const promptId = `${this.agentId}#${turnCounter}`;
@@ -360,9 +360,9 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
     );
 
     if (combinedSignal.aborted) {
-      const terminateReason = timeoutSignal.aborted
-        ? AgentTerminateMode.TIMEOUT
-        : AgentTerminateMode.ABORTED;
+      const terminateReason = externalSignal.aborted
+        ? AgentTerminateMode.ABORTED
+        : AgentTerminateMode.TIMEOUT;
       return {
         status: 'stop',
         terminateReason,
@@ -384,20 +384,23 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
       };
     }
 
-    const { nextMessage, submittedOutput, taskCompleted, aborted } =
+    const { nextMessage, submittedOutput, taskCompleted } =
       await this.processFunctionCalls(
         chat,
         modelToUse,
         functionCalls,
         combinedSignal,
+        externalSignal,
         promptId,
         onWaitingForConfirmation,
       );
 
-    if (aborted) {
+    if (combinedSignal.aborted) {
       return {
         status: 'stop',
-        terminateReason: AgentTerminateMode.ABORTED,
+        terminateReason: externalSignal.aborted
+          ? AgentTerminateMode.ABORTED
+          : AgentTerminateMode.TIMEOUT,
         finalResult: null,
       };
     }
@@ -494,7 +497,7 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
         recoveryMessage,
         turnCounter, // This will be the "last" turn number
         combinedSignal,
-        graceTimeoutController.signal, // Pass grace signal to identify a *grace* timeout
+        externalSignal,
         onWaitingForConfirmation,
       );
 
@@ -693,9 +696,9 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
           // Check for timeout or external abort.
           if (combinedSignal.aborted) {
             // Determine which signal caused the abort.
-            terminateReason = deadlineTimer.signal.aborted
-              ? AgentTerminateMode.TIMEOUT
-              : AgentTerminateMode.ABORTED;
+            terminateReason = signal.aborted
+              ? AgentTerminateMode.ABORTED
+              : AgentTerminateMode.TIMEOUT;
             break;
           }
 
@@ -704,7 +707,7 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
             currentMessage,
             turnCounter++,
             combinedSignal,
-            deadlineTimer.signal,
+            signal,
             onWaitingForConfirmation,
           );
 
@@ -771,7 +774,10 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
           onWaitingForConfirmation,
         );
 
-        if (recoveryResult !== null) {
+        if (signal.aborted) {
+          terminateReason = AgentTerminateMode.ABORTED;
+          finalResult = null;
+        } else if (recoveryResult !== null) {
           // Recovery Succeeded
           terminateReason = AgentTerminateMode.GOAL;
           finalResult = recoveryResult;
@@ -834,13 +840,19 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
         duration_ms: Date.now() - startTime,
       };
     } catch (error) {
-      // Check if the error is an AbortError caused by our internal timeout.
-      if (
-        error instanceof Error &&
-        error.name === 'AbortError' &&
-        deadlineTimer.signal.aborted &&
-        !signal.aborted // Ensure the external signal was not the cause
-      ) {
+      if (signal.aborted) {
+        terminateReason = AgentTerminateMode.ABORTED;
+        return {
+          result: 'Agent execution was cancelled.',
+          terminate_reason: terminateReason,
+          turn_count: turnCounter,
+          duration_ms: Date.now() - startTime,
+        };
+      }
+
+      // The deadline owns this stop regardless of the error a tool or model
+      // produces when its supplied signal is aborted.
+      if (deadlineTimer.signal.aborted) {
         terminateReason = AgentTerminateMode.TIMEOUT;
 
         // Also use the unified recovery logic here
@@ -852,6 +864,11 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
             signal,
             onWaitingForConfirmation,
           );
+
+          if (signal.aborted) {
+            terminateReason = AgentTerminateMode.ABORTED;
+            throw error;
+          }
 
           if (recoveryResult !== null) {
             // Recovery Succeeded
@@ -1144,19 +1161,18 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
     model: string,
     functionCalls: FunctionCall[],
     signal: AbortSignal,
+    externalSignal: AbortSignal,
     promptId: string,
     onWaitingForConfirmation?: (waiting: boolean) => void,
   ): Promise<{
     nextMessage: Content;
     submittedOutput: string | null;
     taskCompleted: boolean;
-    aborted: boolean;
   }> {
     const allowedToolNames = new Set(this.toolRegistry.getAllToolNames());
 
     let submittedOutput: string | null = null;
     let taskCompleted = false;
-    let aborted = false;
 
     const toolRequests: ToolCallRequestInfo[] = [];
     // Map to keep track of tool name by callId for activity emission
@@ -1340,7 +1356,7 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
               error,
               errorType: SubagentActivityErrorType.REJECTED,
             });
-            // Soft rejection: we do NOT set aborted=true, allowing the agent to rethink.
+            // Soft rejection lets the agent rethink without stopping its run.
 
             // Provide the direct instruction to the model as the tool error response.
             syncResults.set(call.request.callId, {
@@ -1351,8 +1367,7 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
               },
             });
             continue; // Skip the generic syncResults.set below
-          } else {
-            // Hard abort (Ctrl+C)
+          } else if (externalSignal.aborted) {
             this.emitActivity('ERROR', {
               context: 'tool_call',
               name: toolName,
@@ -1360,7 +1375,17 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
               error: SUBAGENT_CANCELLED_ERROR_MESSAGE,
               errorType: SubagentActivityErrorType.CANCELLED,
             });
-            aborted = true;
+          } else if (!signal.aborted) {
+            // A tool's own interruption does not cancel the whole agent.
+            this.emitActivity('ERROR', {
+              context: 'tool_call',
+              name: toolName,
+              callId: call.request.callId,
+              error:
+                call.response.error?.message ||
+                'Tool execution was interrupted.',
+              errorType: SubagentActivityErrorType.GENERIC,
+            });
           }
         }
 
@@ -1400,7 +1425,6 @@ export class LocalAgentExecutor<TOutput extends z.ZodTypeAny> {
       nextMessage: { role: 'user', parts: toolResponseParts },
       submittedOutput,
       taskCompleted,
-      aborted,
     };
   }
 

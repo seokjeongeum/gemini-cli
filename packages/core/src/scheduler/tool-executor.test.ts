@@ -212,7 +212,7 @@ describe('ToolExecutor', () => {
     });
   });
 
-  it('should return cancelled result when executeToolWithHooks rejects with AbortError', async () => {
+  it('should report an unrelated AbortError as a tool error while its signal is active', async () => {
     const mockTool = new MockTool({
       name: 'webSearchTool',
       description: 'Mock web search',
@@ -245,15 +245,12 @@ describe('ToolExecutor', () => {
       onUpdateToolCall: vi.fn(),
     });
 
-    expect(result.status).toBe(CoreToolCallStatus.Cancelled);
-    if (result.status === CoreToolCallStatus.Cancelled) {
-      const response = result.response.responseParts[0]?.functionResponse
-        ?.response as Record<string, unknown>;
-      expect(response['error']).toContain('Operation cancelled.');
-    }
+    expect(result.status).toBe(CoreToolCallStatus.Error);
+    expect(result.response.error).toBe(abortErr);
+    expect(result.response.errorType).toBe('unhandled_exception');
   });
 
-  it('should return cancelled result when executeToolWithHooks rejects with "Operation cancelled by user" message', async () => {
+  it('should not infer cancellation from error text while its signal is active', async () => {
     const mockTool = new MockTool({
       name: 'someTool',
       description: 'Mock',
@@ -285,12 +282,8 @@ describe('ToolExecutor', () => {
       onUpdateToolCall: vi.fn(),
     });
 
-    expect(result.status).toBe(CoreToolCallStatus.Cancelled);
-    if (result.status === CoreToolCallStatus.Cancelled) {
-      const response = result.response.responseParts[0]?.functionResponse
-        ?.response as Record<string, unknown>;
-      expect(response['error']).toContain('User cancelled tool execution.');
-    }
+    expect(result.status).toBe(CoreToolCallStatus.Error);
+    expect(result.response.error).toBe(cancelErr);
   });
 
   it('should return cancelled result when signal is aborted', async () => {

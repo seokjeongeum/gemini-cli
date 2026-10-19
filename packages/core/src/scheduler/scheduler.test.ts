@@ -1104,6 +1104,27 @@ describe('Scheduler (Orchestrator)', () => {
       nonCascadingScheduler.dispose();
     });
 
+    it('should report a confirmation AbortError as an error while its signal is active', async () => {
+      vi.mocked(checkPolicy).mockResolvedValue({
+        decision: PolicyDecision.ASK_USER,
+        rule: undefined,
+      });
+      const error = Object.assign(
+        new Error('Confirmation transport interrupted'),
+        { name: 'AbortError' },
+      );
+      vi.mocked(resolveConfirmation).mockRejectedValue(error);
+      await scheduler.schedule(req1, signal);
+      expect(signal.aborted).toBe(false);
+      expect(mockExecutor.execute).not.toHaveBeenCalled();
+      expect(mockStateManager.updateStatus).toHaveBeenCalledWith(
+        'call-1',
+        CoreToolCallStatus.Error,
+        expect.objectContaining({ error }),
+      );
+      expect(mockStateManager.cancelAllQueued).not.toHaveBeenCalled();
+    });
+
     it('should mark as cancelled (not errored) when abort happens during confirmation error', async () => {
       vi.mocked(checkPolicy).mockResolvedValue({
         decision: PolicyDecision.ASK_USER,

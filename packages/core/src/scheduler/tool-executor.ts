@@ -168,12 +168,10 @@ export class ToolExecutor {
           }
         } catch (executionError: unknown) {
           spanMetadata.error = executionError;
-          const abortedByError =
-            isAbortError(executionError) ||
-            (executionError instanceof Error &&
-              executionError.message.includes('Operation cancelled by user'));
-
-          if (signal.aborted || abortedByError) {
+          // Only the signal supplied for this execution owns cancellation.
+          // A tool or transport can abort its own operation while the agent
+          // remains active, in which case its failure is a normal tool error.
+          if (signal.aborted) {
             completedToolCall = await this.createCancelledResult(
               call,
               isAbortError(executionError)

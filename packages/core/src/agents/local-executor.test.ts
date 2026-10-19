@@ -2194,37 +2194,40 @@ describe('LocalAgentExecutor', () => {
       mockModelResponse([
         { name: LS_TOOL_NAME, args: { path: '/secret' }, id: 'call1' },
       ]);
-      mockScheduleAgentTools.mockResolvedValueOnce([
-        {
-          status: 'cancelled',
-          request: {
-            callId: 'call1',
-            name: LS_TOOL_NAME,
-            args: { path: '/secret' },
-            isClientInitiated: false,
-            prompt_id: 'test-prompt',
-          },
-          tool: {} as AnyDeclarativeTool,
-          invocation: {} as unknown as AnyToolInvocation,
-          outcome: undefined, // Hard abort
-          response: {
-            callId: 'call1',
-            resultDisplay: '',
-            responseParts: [
-              {
-                functionResponse: {
-                  name: LS_TOOL_NAME,
-                  response: { error: 'Request cancelled.' },
-                  id: 'call1',
+      mockScheduleAgentTools.mockImplementationOnce(async () => {
+        abortController.abort();
+        return [
+          {
+            status: 'cancelled',
+            request: {
+              callId: 'call1',
+              name: LS_TOOL_NAME,
+              args: { path: '/secret' },
+              isClientInitiated: false,
+              prompt_id: 'test-prompt',
+            },
+            tool: {} as AnyDeclarativeTool,
+            invocation: {} as unknown as AnyToolInvocation,
+            outcome: undefined, // Hard abort
+            response: {
+              callId: 'call1',
+              resultDisplay: '',
+              responseParts: [
+                {
+                  functionResponse: {
+                    name: LS_TOOL_NAME,
+                    response: { error: 'Request cancelled.' },
+                    id: 'call1',
+                  },
                 },
-              },
-            ],
-            error: undefined,
-            errorType: undefined,
-            contentLength: 0,
+              ],
+              error: undefined,
+              errorType: undefined,
+              contentLength: 0,
+            },
           },
-        },
-      ]);
+        ];
+      });
 
       const output = await executor.run({ goal: 'Hard abort test' }, signal);
 
@@ -2243,6 +2246,69 @@ describe('LocalAgentExecutor', () => {
 
       // Agent should terminate with ABORTED status
       expect(output.terminate_reason).toBe(AgentTerminateMode.ABORTED);
+    });
+
+    it('should continue to completion after an unowned tool interruption', async () => {
+      const executor = await LocalAgentExecutor.create(
+        createTestDefinition([LS_TOOL_NAME]),
+        mockConfig,
+        onActivity,
+      );
+      mockModelResponse([
+        { name: LS_TOOL_NAME, args: { path: '.' }, id: 'interrupted-tool' },
+      ]);
+      mockScheduleAgentTools.mockImplementationOnce(
+        async (_context, requests: ToolCallRequestInfo[]) => [
+          {
+            status: 'cancelled',
+            request: requests[0],
+            tool: {} as AnyDeclarativeTool,
+            invocation: {} as AnyToolInvocation,
+            response: {
+              callId: 'interrupted-tool',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'interrupted-tool',
+                    name: LS_TOOL_NAME,
+                    response: { error: 'Transport interrupted' },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      );
+      mockModelResponse([
+        {
+          name: COMPLETE_TASK_TOOL_NAME,
+          args: { finalResult: 'Recovered from tool failure' },
+          id: 'complete',
+        },
+      ]);
+      const output = await executor.run(
+        { goal: 'Recover from unrelated tool abort' },
+        signal,
+      );
+      expect(signal.aborted).toBe(false);
+      expect(output.terminate_reason).toBe(AgentTerminateMode.GOAL);
+      expect(output.result).toBe('Recovered from tool failure');
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      expect(getMockMessageParams(1).message).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({
+            response: { error: 'Transport interrupted' },
+          }),
+        }),
+      ]);
+      expect(activities).not.toContainEqual(
+        expect.objectContaining({
+          type: 'ERROR',
+          data: expect.objectContaining({
+            errorType: SubagentActivityErrorType.CANCELLED,
+          }),
+        }),
+      );
     });
 
     it('should throw a critical error when a tool response is dropped by the scheduler', async () => {
@@ -2544,109 +2610,161 @@ describe('LocalAgentExecutor', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(MAX + 1);
     });
 
-    it('should terminate with TIMEOUT if a model call takes too long', async () => {
-      const definition = createTestDefinition([LS_TOOL_NAME], {
-        maxTimeMinutes: 0.5, // 30 seconds
-      });
-      const executor = await LocalAgentExecutor.create(
-        definition,
-        mockConfig,
-        onActivity,
-      );
+    it.each(['complete', 'AbortError', 'Error'])(
+      'should retain model deadline recovery when the stream ends with %s',
+      async (ending) => {
+        const definition = createTestDefinition([LS_TOOL_NAME], {
+          maxTimeMinutes: 0.5, // 30 seconds
+        });
+        const executor = await LocalAgentExecutor.create(
+          definition,
+          mockConfig,
+          onActivity,
+        );
 
-      // Mock a model call that is interruptible by an abort signal.
-      mockSendMessageStream.mockImplementationOnce(
-        async (_key, _message, _promptId, signal) =>
-          // eslint-disable-next-line require-yield
-          (async function* () {
-            await new Promise<void>((resolve) => {
-              // This promise resolves when aborted, ending the generator.
-              signal?.addEventListener(
-                'abort',
-                () => {
-                  resolve();
-                },
-                { once: true },
-              );
-            });
-          })(),
-      );
-      // Recovery turn
-      mockModelResponse([], 'I give up');
+        // Mock a model call that is interruptible by an abort signal.
+        mockSendMessageStream.mockImplementationOnce(
+          async (_key, _message, _promptId, signal) =>
+            // eslint-disable-next-line require-yield
+            (async function* () {
+              await new Promise<void>((resolve, reject) => {
+                // This promise resolves when aborted, ending the generator.
+                signal?.addEventListener(
+                  'abort',
+                  () => {
+                    if (ending === 'complete') {
+                      resolve();
+                    } else {
+                      const error = new Error(
+                        'Model interrupted after deadline',
+                      );
+                      error.name = ending;
+                      reject(error);
+                    }
+                  },
+                  { once: true },
+                );
+              });
+            })(),
+        );
+        // Recovery turn
+        mockModelResponse([], 'I give up');
 
-      const runPromise = executor.run({ goal: 'Timeout test' }, signal);
+        const runPromise = executor.run({ goal: 'Timeout test' }, signal);
 
-      // Advance time past the timeout to trigger the abort.
-      await vi.advanceTimersByTimeAsync(31 * 1000);
+        // Advance time past the timeout to trigger the abort.
+        await vi.advanceTimersByTimeAsync(31 * 1000);
 
-      const output = await runPromise;
+        const output = await runPromise;
 
-      expect(output.terminate_reason).toBe(AgentTerminateMode.TIMEOUT);
-      expect(output.result).toContain('Agent timed out after 0.5 minutes.');
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(output.terminate_reason).toBe(AgentTerminateMode.TIMEOUT);
+        expect(output.result).toContain('Agent timed out after 0.5 minutes.');
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
 
-      // Verify activity stream reported the timeout
-      expect(activities).toContainEqual(
-        expect.objectContaining({
-          type: 'ERROR',
-          data: expect.objectContaining({
-            context: 'timeout',
-            error: 'Agent timed out after 0.5 minutes.',
-            errorType: SubagentActivityErrorType.GENERIC,
+        // Verify activity stream reported the timeout
+        expect(activities).toContainEqual(
+          expect.objectContaining({
+            type: 'ERROR',
+            data: expect.objectContaining({
+              context: 'timeout',
+              error: 'Agent timed out after 0.5 minutes.',
+              errorType: SubagentActivityErrorType.GENERIC,
+            }),
           }),
-        }),
-      );
+        );
 
-      // Verify telemetry
-      expect(mockedLogAgentFinish).toHaveBeenCalledWith(
-        mockConfig,
-        expect.objectContaining({
-          terminate_reason: AgentTerminateMode.TIMEOUT,
-        }),
-      );
-    });
+        // Verify telemetry
+        expect(mockedLogAgentFinish).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            terminate_reason: AgentTerminateMode.TIMEOUT,
+          }),
+        );
+      },
+    );
 
-    it('should terminate with TIMEOUT if a tool call takes too long', async () => {
-      const definition = createTestDefinition([LS_TOOL_NAME], {
-        maxTimeMinutes: 1,
-      });
-      const executor = await LocalAgentExecutor.create(definition, mockConfig);
+    it.each([true, false])(
+      'should retain deadline recovery when a tool is cancelled (recovery succeeds: %s)',
+      async (recover) => {
+        const definition = createTestDefinition([LS_TOOL_NAME], {
+          maxTimeMinutes: 1,
+        });
+        const executor = await LocalAgentExecutor.create(
+          definition,
+          mockConfig,
+          onActivity,
+        );
 
-      mockModelResponse([
-        { name: LS_TOOL_NAME, args: { path: '.' }, id: 't1' },
-      ]);
+        mockModelResponse([
+          { name: LS_TOOL_NAME, args: { path: '.' }, id: 't1' },
+        ]);
 
-      // Long running tool
-      mockScheduleAgentTools.mockImplementationOnce(
-        async (_ctx, requests: ToolCallRequestInfo[]) => {
-          await vi.advanceTimersByTimeAsync(61 * 1000);
-          return [
-            {
-              status: 'success',
-              request: requests[0],
-              tool: {} as AnyDeclarativeTool,
-              invocation: {} as unknown as AnyToolInvocation,
-              response: {
-                callId: 't1',
-                resultDisplay: 'ok',
-                responseParts: [],
-                error: undefined,
-                errorType: undefined,
-                contentLength: undefined,
+        // Long running tool
+        mockScheduleAgentTools.mockImplementationOnce(
+          async (
+            _ctx,
+            requests: ToolCallRequestInfo[],
+            options: { signal: AbortSignal },
+          ) => {
+            await vi.advanceTimersByTimeAsync(61 * 1000);
+            expect(options.signal.aborted).toBe(true);
+            return [
+              {
+                status: 'cancelled',
+                request: requests[0],
+                tool: {} as AnyDeclarativeTool,
+                invocation: {} as unknown as AnyToolInvocation,
+                response: {
+                  callId: 't1',
+                  resultDisplay: 'ok',
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: 't1',
+                        name: LS_TOOL_NAME,
+                        response: { error: 'Tool signal aborted' },
+                      },
+                    },
+                  ],
+                  error: undefined,
+                  errorType: undefined,
+                  contentLength: undefined,
+                },
               },
+            ];
+          },
+        );
+
+        // Recovery turn
+        if (recover) {
+          mockModelResponse([
+            {
+              name: COMPLETE_TASK_TOOL_NAME,
+              args: { finalResult: 'Recovered after deadline' },
+              id: 'recover',
             },
-          ];
-        },
-      );
+          ]);
+        } else {
+          mockModelResponse([], 'I give up');
+        }
 
-      // Recovery turn
-      mockModelResponse([], 'I give up');
+        const output = await executor.run({ goal: 'Timeout test' }, signal);
 
-      const output = await executor.run({ goal: 'Timeout test' }, signal);
-
-      expect(output.terminate_reason).toBe(AgentTerminateMode.TIMEOUT);
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-    });
+        expect(output.terminate_reason).toBe(
+          recover ? AgentTerminateMode.GOAL : AgentTerminateMode.TIMEOUT,
+        );
+        expect(signal.aborted).toBe(false);
+        expect(activities).not.toContainEqual(
+          expect.objectContaining({
+            type: 'ERROR',
+            data: expect.objectContaining({
+              errorType: SubagentActivityErrorType.CANCELLED,
+            }),
+          }),
+        );
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      },
+    );
 
     it('should terminate when AbortSignal is triggered', async () => {
       const definition = createTestDefinition();

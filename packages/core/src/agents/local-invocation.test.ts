@@ -511,15 +511,53 @@ describe('LocalSubagentInvocation', () => {
       );
     });
 
-    it('should throw an error and bubble cancellation when execution returns ABORTED', async () => {
+    it.each([
+      Object.assign(new Error('Transport interrupted'), { name: 'AbortError' }),
+      new Error('Aborted by upstream transport'),
+    ])(
+      'should report an unowned $name as an error with a live parent signal',
+      async (error) => {
+        mockExecutorInstance.run.mockRejectedValue(error);
+        const result = await invocation.execute({
+          abortSignal: signal,
+          updateOutput,
+        });
+        expect(signal.aborted).toBe(false);
+        expect((result.returnDisplay as SubagentProgress).state).toBe(
+          SubagentState.ERROR,
+        );
+        expect(result.llmContent).toContain(error.message);
+      },
+    );
+
+    it('should report an unexplained ABORTED result as an error', async () => {
+      mockExecutorInstance.run.mockResolvedValue({
+        result: 'Interrupted',
+        terminate_reason: AgentTerminateMode.ABORTED,
+      });
+      const result = await invocation.execute({
+        abortSignal: signal,
+        updateOutput,
+      });
+      expect((result.returnDisplay as SubagentProgress).state).toBe(
+        SubagentState.ERROR,
+      );
+      expect(result.llmContent).toContain('without an external cancellation');
+    });
+
+    it('should throw an error and bubble cancellation when its parent signal is aborted', async () => {
       const mockOutput = {
         result: 'Cancelled by user',
         terminate_reason: AgentTerminateMode.ABORTED,
       };
-      mockExecutorInstance.run.mockResolvedValue(mockOutput);
+      const controller = new AbortController();
+      mockExecutorInstance.run.mockImplementation(async () => {
+        controller.abort();
+        return mockOutput;
+      });
 
       await expect(
-        invocation.execute({ abortSignal: signal, updateOutput }),
+        invocation.execute({ abortSignal: controller.signal, updateOutput }),
       ).rejects.toThrow('Operation cancelled by user');
     });
 

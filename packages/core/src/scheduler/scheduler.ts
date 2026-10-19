@@ -615,7 +615,7 @@ export class Scheduler {
       const err = error instanceof Error ? error : new Error(String(error));
       // If the signal aborted while we were waiting on something, treat as
       // cancelled. Otherwise, it's a genuine unhandled system exception.
-      if (signal.aborted || err.name === 'AbortError') {
+      if (signal.aborted) {
         this.state.updateStatus(
           active.request.callId,
           CoreToolCallStatus.Cancelled,
