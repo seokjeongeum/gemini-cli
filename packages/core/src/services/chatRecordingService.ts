@@ -14,7 +14,11 @@ import {
   deleteSessionArtifactsAsync,
   deleteStoredSession,
 } from '../utils/sessionOperations.js';
-import readline from 'node:readline';
+import {
+  readLines,
+  readLinesSync,
+  isRecordCapacityError,
+} from '../utils/readLines.js';
 import { randomUUID } from 'node:crypto';
 import type {
   PartListUnion,
@@ -611,27 +615,25 @@ function loadConversationRecordSync(
   }
 
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
     const accumulator = createJsonlRecordAccumulator(options);
-    let start = 0;
-    while (start < content.length) {
-      const nl = content.indexOf('\n', start);
-      const line = nl === -1 ? content.slice(start) : content.slice(start, nl);
+    for (const line of readLinesSync(filePath)) {
       accumulator.processLine(line);
-      if (nl === -1) break;
-      start = nl + 1;
     }
 
     const result = accumulator.finalize();
     if (result) {
       return result;
     }
-    return parseLegacyContentFallback(content, options);
+    return parseLegacyContentFallback(
+      fs.readFileSync(filePath, 'utf8'),
+      options,
+    );
   } catch (error) {
     debugLogger.error(
       'Error loading conversation record synchronously:',
       error,
     );
+    if (isRecordCapacityError(error)) throw error;
     return null;
   }
 }
@@ -645,14 +647,8 @@ export async function loadConversationRecord(
   }
 
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity,
-    });
-
     const accumulator = createJsonlRecordAccumulator(options);
-    for await (const line of rl) {
+    for await (const line of readLines(filePath)) {
       accumulator.processLine(line);
     }
 
@@ -663,6 +659,7 @@ export async function loadConversationRecord(
     return await parseLegacyRecordFallback(filePath, options);
   } catch (error) {
     debugLogger.error('Error loading conversation record from JSONL:', error);
+    if (isRecordCapacityError(error)) throw error;
     return null;
   }
 }
@@ -973,55 +970,51 @@ export class ChatRecordingService {
     }
 
     const { messages, memoryScratchpad, ...metadata } = conversation;
-    const lines: string[] = [JSON.stringify(metadata)];
-    for (const msg of messages) {
-      lines.push(JSON.stringify(msg));
-    }
-    if (memoryScratchpad) {
-      lines.push(JSON.stringify({ $set: { memoryScratchpad } }));
-    }
-    const content = lines.join('\n') + '\n';
+    const tempFile = `${this.conversationFile}.tmp-${process.pid}`;
+    let ownsTempFile = false;
 
     try {
       fs.mkdirSync(path.dirname(this.conversationFile), { recursive: true });
+      const descriptor = fs.openSync(tempFile, 'wx');
+      ownsTempFile = true;
+      try {
+        // Finish serializing before touching an existing session. Writing each
+        // record separately also avoids the aggregate V8 string-size limit.
+        fs.writeFileSync(descriptor, JSON.stringify(metadata) + '\n');
+        for (const message of messages) {
+          fs.writeFileSync(descriptor, JSON.stringify(message) + '\n');
+        }
+        if (memoryScratchpad) {
+          fs.writeFileSync(
+            descriptor,
+            JSON.stringify({ $set: { memoryScratchpad } }) + '\n',
+          );
+        }
+      } finally {
+        fs.closeSync(descriptor);
+      }
 
-      // The existing file was unreadable, but it may have been only
-      // transiently so (a lock or I/O blip) rather than truly corrupt. Keep
-      // its bytes rather than destroying them.
+      // A failed backup must abort publication, leaving the original intact.
       if (fs.existsSync(this.conversationFile)) {
         const backup = `${this.conversationFile}.unreadable-${Date.now()}`;
-        try {
-          fs.renameSync(this.conversationFile, backup);
-          debugLogger.warn(
-            `Preserved the unreadable session file at ${backup}.`,
-          );
-        } catch (backupError) {
-          debugLogger.error(
-            'Failed to preserve the unreadable session file.',
-            backupError,
-          );
-        }
+        fs.renameSync(this.conversationFile, backup);
+        debugLogger.warn(`Preserved the unreadable session file at ${backup}.`);
       }
-
-      const tempFile = `${this.conversationFile}.tmp-${process.pid}`;
-      try {
-        fs.writeFileSync(tempFile, content);
-        fs.renameSync(tempFile, this.conversationFile);
-      } catch (error) {
-        // The rename did not complete, so the temp file would be left behind.
-        try {
-          fs.unlinkSync(tempFile);
-        } catch {
-          // Ignore cleanup errors so the original failure still surfaces.
-        }
-        throw error;
-      }
+      fs.renameSync(tempFile, this.conversationFile);
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOSPC') {
         this.conversationFile = null;
         debugLogger.warn(ENOSPC_WARNING_MESSAGE);
       } else {
         throw error;
+      }
+    } finally {
+      if (ownsTempFile) {
+        try {
+          fs.unlinkSync(tempFile);
+        } catch {
+          // The file was published or cleanup failed; preserve the original error.
+        }
       }
     }
   }
@@ -1705,7 +1698,8 @@ async function parseLegacyRecordFallback(
   try {
     const fileContent = await fs.promises.readFile(filePath, 'utf8');
     return parseLegacyContentFallback(fileContent, options);
-  } catch {
+  } catch (error) {
+    if (isRecordCapacityError(error)) throw error;
     return null;
   }
 }

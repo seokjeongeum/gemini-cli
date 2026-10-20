@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
+import type { HistoryTurn } from './agentChatHistory.js';
 import { GeminiClient } from './client.js';
 import {
   AuthType,
@@ -340,6 +341,93 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('tool output masking history', () => {
+    it('preserves durable IDs and does not re-record images across repeated masking', async () => {
+      const history: HistoryTurn[] = Array.from({ length: 70 }, (_, index) => ({
+        id: `turn-${index}`,
+        content: {
+          role: index % 2 === 0 ? 'user' : 'model',
+          parts: [{ text: `message-${index}` }],
+        },
+      }));
+      const image = {
+        inlineData: { mimeType: 'image/png', data: 'synthetic-image-data' },
+      };
+      history[0].content.parts!.push(image);
+      history[1].content.parts = [
+        { functionCall: { id: 'mask-call', name: 'read_file', args: {} } },
+      ];
+      history[2].content.parts = [
+        {
+          functionResponse: {
+            id: 'mask-call',
+            name: 'read_file',
+            response: { output: 'original output' },
+          },
+        },
+      ];
+      client.setHistory(history);
+      const filePath = client
+        .getChatRecordingService()!
+        .getConversationFilePath()!;
+      const before = mockFileSystem.get(filePath)!.length;
+      const mask = vi.spyOn(client['toolOutputMaskingService'], 'mask');
+
+      for (let round = 0; round < 3; round++) {
+        const turns = client.getChat().getHistoryTurns();
+        const newHistory = turns.map((turn) => turn.content);
+        newHistory[2] = {
+          ...newHistory[2],
+          parts: [
+            {
+              functionResponse: {
+                id: 'mask-call',
+                name: 'read_file',
+                response: { output: `masked output ${round}` },
+              },
+            },
+          ],
+        };
+        mask.mockResolvedValueOnce({
+          newHistory,
+          maskedCount: 1,
+          tokensSaved: 10,
+        });
+        await client['tryMaskToolOutputs'](turns);
+        expect(
+          client
+            .getChat()
+            .getHistoryTurns()
+            .map((turn) => turn.id),
+        ).toEqual(history.map((turn) => turn.id));
+        expect(client.getHistory()[0].parts![1]).toEqual(image);
+      }
+      const appended = mockFileSystem.get(filePath)!.slice(before);
+      expect(appended).not.toContain('synthetic-image-data');
+      expect(appended).not.toContain('"removeIds"');
+      expect(appended).not.toContain('"orderIds"');
+      const records = appended
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(
+        records.every((record) => '$patch' in record || '$set' in record),
+      ).toBe(true);
+    });
+
+    it('does not replace history when masking makes no changes', async () => {
+      const setHistory = vi.fn();
+      client['chat'] = { setHistory } as unknown as GeminiChat;
+      vi.spyOn(client['toolOutputMaskingService'], 'mask').mockResolvedValue({
+        newHistory: [],
+        maskedCount: 0,
+        tokensSaved: 0,
+      });
+      await client['tryMaskToolOutputs']([]);
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+  });
+
   describe('setHistory', () => {
     it('should update telemetry token count and clear currentSequenceModel when history is set', () => {
       client['currentSequenceModel'] = 'gemini-3-flash-preview';
@@ -486,6 +574,12 @@ describe('Gemini Client (client.ts)', () => {
       }));
 
       client['chat'] = {
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
         setHistory: vi.fn(),
@@ -504,6 +598,12 @@ describe('Gemini Client (client.ts)', () => {
       compressionStatus = CompressionStatus.COMPRESSED,
     } = {}) {
       const mockOriginalChat: Partial<GeminiChat> = {
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
         setHistory: vi.fn(),
         getLastPromptTokenCount: vi.fn().mockReturnValue(originalTokenCount),
@@ -536,6 +636,12 @@ describe('Gemini Client (client.ts)', () => {
       });
 
       const mockNewChat: Partial<GeminiChat> = {
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue(newHistory),
         setHistory: vi.fn(),
         getLastPromptTokenCount: vi.fn().mockReturnValue(newTokenCount),
@@ -964,6 +1070,12 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       } as unknown as GeminiChat;
@@ -1028,6 +1140,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1087,6 +1205,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1165,6 +1289,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1283,6 +1413,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1326,6 +1462,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1372,6 +1514,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1438,6 +1586,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1496,6 +1650,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -1557,6 +1717,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
@@ -1618,6 +1784,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
@@ -1672,6 +1844,12 @@ ${JSON.stringify(
       // Use the real GeminiChat to manage state and token counts more realistically
       const mockChatCompressed = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(400),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'old' }] }]),
@@ -1685,6 +1863,12 @@ ${JSON.stringify(
 
       const mockChatInitial = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(initialTokenCount),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'old' }] }]),
@@ -1828,6 +2012,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
@@ -1902,6 +2092,12 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi.fn().mockReturnValue([]),
           getLastPromptTokenCount: vi.fn(),
         };
@@ -2121,6 +2317,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -2164,6 +2366,12 @@ ${JSON.stringify(
           setHistory: vi.fn(),
           setTools: vi.fn(),
           // Assume history is not empty for delta checks
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi
             .fn()
             .mockReturnValue([
@@ -2540,6 +2748,12 @@ ${JSON.stringify(
 
         mockChat = {
           addHistory: vi.fn(),
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
           setTools: vi.fn(),
@@ -2884,6 +3098,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -2922,6 +3142,12 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
+        getHistoryTurns() {
+          return (this.getHistory?.() ?? []).map((content, index) => ({
+            id: String(index),
+            content,
+          }));
+        },
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn(),
       };
@@ -2946,6 +3172,12 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi.fn().mockReturnValue([]),
           getLastPromptTokenCount: vi.fn(),
         };
@@ -3392,6 +3624,12 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi.fn().mockReturnValue([]),
           getLastPromptTokenCount: vi.fn(),
         };
@@ -3427,6 +3665,12 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
+          getHistoryTurns() {
+            return (this.getHistory?.() ?? []).map((content, index) => ({
+              id: String(index),
+              content,
+            }));
+          },
           getHistory: vi.fn().mockReturnValue([]),
           getLastPromptTokenCount: vi.fn(),
         };

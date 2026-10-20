@@ -477,6 +477,118 @@ describe('ChatRecordingService', () => {
       );
     });
 
+    it('preserves the original file when a capacity error prevents legacy loading', async () => {
+      const filePath = path.join(testTempDir, 'capacity.jsonl');
+      const original = '{"not":"session metadata"}\n';
+      fs.writeFileSync(filePath, original);
+      vi.mocked(fs.promises.readFile).mockRejectedValueOnce(
+        Object.assign(
+          new Error('Cannot create a string longer than the limit'),
+          {
+            code: 'ERR_STRING_TOO_LONG',
+          },
+        ),
+      );
+      await expect(
+        chatRecordingService.initialize({
+          filePath,
+          conversation: {
+            sessionId: 'capacity-session',
+            projectHash: 'hash',
+            startTime: '2026-01-01',
+            lastUpdated: '2026-01-01',
+            messages: [],
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'ERR_STRING_TOO_LONG' });
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      expect(fs.readdirSync(testTempDir)).toEqual(['capacity.jsonl']);
+    });
+
+    it('finishes serializing recovery records before backing up an existing file', async () => {
+      const filePath = path.join(testTempDir, 'capacity-rewrite.jsonl');
+      const original = '{"not":"session metadata"}\n';
+      fs.writeFileSync(filePath, original);
+      const message: MessageRecord = {
+        id: 'm1',
+        type: 'user',
+        timestamp: '2026-01-01',
+        content: 'hello',
+      };
+      const stringify = JSON.stringify;
+      vi.spyOn(JSON, 'stringify').mockImplementation((value: unknown) => {
+        if (value === message) throw new RangeError('Invalid string length');
+        return stringify(value);
+      });
+      await expect(
+        chatRecordingService.initialize({
+          filePath,
+          conversation: {
+            sessionId: 'capacity-session',
+            projectHash: 'hash',
+            startTime: '2026-01-01',
+            lastUpdated: '2026-01-01',
+            messages: [message],
+          },
+        }),
+      ).rejects.toThrow('Invalid string length');
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      expect(fs.readdirSync(testTempDir)).toEqual(['capacity-rewrite.jsonl']);
+    });
+
+    it('aborts recovery when the original file cannot be backed up', async () => {
+      const filePath = path.join(testTempDir, 'backup-fails.jsonl');
+      const original = '{"not":"session metadata"}\n';
+      fs.writeFileSync(filePath, original);
+      vi.spyOn(fs, 'renameSync').mockImplementation(() => {
+        throw new Error('backup denied');
+      });
+      await expect(
+        chatRecordingService.initialize({
+          filePath,
+          conversation: {
+            sessionId: 'backup-session',
+            projectHash: 'hash',
+            startTime: '2026-01-01',
+            lastUpdated: '2026-01-01',
+            messages: [],
+          },
+        }),
+      ).rejects.toThrow('backup denied');
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      expect(fs.readdirSync(testTempDir)).toEqual(['backup-fails.jsonl']);
+    });
+
+    it('preserves original bytes in the backup when publication fails', async () => {
+      const filePath = path.join(testTempDir, 'publish-fails.jsonl');
+      const original = '{"not":"session metadata"}\n';
+      fs.writeFileSync(filePath, original);
+      const renameSync = fs.renameSync;
+      vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+        if (String(from).includes('.tmp-'))
+          throw new Error('publication denied');
+        return renameSync(from, to);
+      });
+      await expect(
+        chatRecordingService.initialize({
+          filePath,
+          conversation: {
+            sessionId: 'publish-session',
+            projectHash: 'hash',
+            startTime: '2026-01-01',
+            lastUpdated: '2026-01-01',
+            messages: [],
+          },
+        }),
+      ).rejects.toThrow('publication denied');
+      const files = fs.readdirSync(testTempDir);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^publish-fails\.jsonl\.unreadable-/);
+      expect(fs.readFileSync(path.join(testTempDir, files[0]), 'utf8')).toBe(
+        original,
+      );
+    });
+
     it('should not leave a temp file behind when the rewrite fails', async () => {
       const chatsDir = path.join(testTempDir, 'chats');
       fs.mkdirSync(chatsDir, { recursive: true });
@@ -2337,6 +2449,166 @@ describe('ChatRecordingService', () => {
       expect(afterRollback[0].id).toBe(history[0].id);
       expect(afterRollback[39].id).toBe(history[39].id);
     });
+
+    it('replays chunked JSONL with malformed lines and refills evicted messages on rewind', async () => {
+      const filePath = path.join(testTempDir, 'chunked.jsonl');
+      const messages: MessageRecord[] = Array.from(
+        { length: 70 },
+        (_, index) => ({
+          id: `m-${index}`,
+          type: index % 2 ? 'gemini' : 'user',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          content:
+            index === 0
+              ? 'a'.repeat(64 * 1024 - 1) + '한😀'
+              : `message-${index}`,
+        }),
+      );
+      fs.writeFileSync(
+        filePath,
+        [
+          JSON.stringify({ sessionId: 'chunked-session', projectHash: 'hash' }),
+          '{malformed line',
+          ...messages.map((message) => JSON.stringify(message)),
+        ].join('\r\n') + '\r\n',
+      );
+      await chatRecordingService.initialize({
+        filePath,
+        conversation: {
+          sessionId: 'chunked-session',
+          projectHash: 'hash',
+          startTime: '2026-01-01',
+          lastUpdated: '2026-01-01',
+          messages: [],
+        },
+      });
+      vi.mocked(fs.readFileSync).mockClear();
+      expect(chatRecordingService.getConversation()!.messages).toEqual(
+        messages,
+      );
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      expect(chatRecordingService.rewindTo('m-40')!.messages).toEqual(
+        messages.slice(0, 40),
+      );
+      expect((await loadConversationRecord(filePath))!.messages).toEqual(
+        messages.slice(0, 40),
+      );
+    });
+
+    it('patches repeated masked tool results without duplicating unchanged image turns', async () => {
+      await chatRecordingService.initialize();
+      const image = 'synthetic-image-'.repeat(2048);
+      const history: HistoryTurn[] = [];
+      const callId = 'masked-call';
+      for (let index = 0; index < 70; index++) {
+        const parts: Part[] =
+          index === 0
+            ? [
+                { text: 'inspect image' },
+                { inlineData: { mimeType: 'image/png', data: image } },
+              ]
+            : index === 2
+              ? [
+                  {
+                    functionResponse: {
+                      id: callId,
+                      name: 'read_file',
+                      response: { output: 'original tool output' },
+                    },
+                  },
+                ]
+              : [{ text: `message-${index}` }];
+        const id = chatRecordingService.recordMessage({
+          type: index % 2 ? 'gemini' : 'user',
+          model: 'gemini-pro',
+          content: parts,
+        });
+        history.push({
+          id,
+          content: { role: index % 2 ? 'model' : 'user', parts },
+        });
+        if (index === 1) {
+          chatRecordingService.recordToolCalls('gemini-pro', [
+            {
+              id: callId,
+              name: 'read_file',
+              args: {},
+              result: [{ text: 'original tool output' }],
+              status: CoreToolCallStatus.Success,
+              timestamp: '2026-01-01',
+            },
+          ]);
+        }
+      }
+      chatRecordingService.updateMessagesFromHistory(history);
+      const filePath = chatRecordingService.getConversationFilePath()!;
+      const before = fs.statSync(filePath).size;
+      for (let round = 0; round < 3; round++) {
+        history[2] = {
+          ...history[2],
+          content: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'read_file',
+                  response: { output: `masked-${round}` },
+                },
+              },
+            ],
+          },
+        };
+        chatRecordingService.updateMessagesFromHistory(history);
+      }
+      const raw = fs.readFileSync(filePath, 'utf8');
+      expect(raw.slice(before)).not.toContain(image);
+      expect(raw.slice(before)).not.toContain('"removeIds"');
+      const loaded = (await loadConversationRecord(filePath))!;
+      expect(loaded.messages.map((message) => message.id)).toEqual(
+        history.map((turn) => turn.id),
+      );
+      expect(loaded.messages[0].content).toEqual(history[0].content.parts);
+      const modelMessage = loaded.messages[1];
+      expect(
+        modelMessage.type === 'gemini' && modelMessage.toolCalls![0].result,
+      ).toEqual(history[2].content.parts);
+      vi.mocked(fs.appendFileSync).mockClear();
+      chatRecordingService.updateMessagesFromHistory(history);
+      expect(fs.appendFileSync).not.toHaveBeenCalled();
+      expect(
+        chatRecordingService.rewindTo(history[40].id)!.messages,
+      ).toHaveLength(40);
+      expect((await loadConversationRecord(filePath))!.messages).toHaveLength(
+        40,
+      );
+    });
+
+    it.runIf(process.env['GEMINI_TEST_LARGE_JSONL'] === '1')(
+      'replays a real JSONL file larger than the V8 aggregate string limit',
+      async () => {
+        await chatRecordingService.initialize();
+        for (let index = 0; index < 70; index++) {
+          chatRecordingService.recordMessage({
+            type: 'user',
+            model: undefined,
+            content: `message-${index}`,
+          });
+        }
+        const filePath = chatRecordingService.getConversationFilePath()!;
+        const padding = ' '.repeat(1024 * 1024) + '\n';
+        for (let index = 0; index < 513; index++)
+          fs.appendFileSync(filePath, padding);
+        expect(fs.statSync(filePath).size).toBeGreaterThan(0x1fffffe8);
+        expect(chatRecordingService.getConversation()!.messages).toHaveLength(
+          70,
+        );
+        expect((await loadConversationRecord(filePath))!.messages).toHaveLength(
+          70,
+        );
+      },
+      120000,
+    );
 
     it('should detect in-place mutations to Part objects and modifications at index >= 1 in updateMessagesFromHistory', async () => {
       await chatRecordingService.initialize();
