@@ -12,6 +12,7 @@ import type { EditorType } from './editor.js';
 import type {
   TokenStorageInitializationEvent,
   KeychainAvailabilityEvent,
+  LlmRole,
 } from '../telemetry/types.js';
 import { debugLogger } from './debugLogger.js';
 import type { ApprovalMode } from '../policy/types.js';
@@ -135,6 +136,8 @@ export interface HookSystemMessagePayload extends HookPayload {
  * Payload for the 'retry-attempt' event.
  */
 export interface RetryAttemptPayload {
+  role: LlmRole;
+  promptId: string;
   attempt: number;
   maxAttempts: number;
   delayMs: number;

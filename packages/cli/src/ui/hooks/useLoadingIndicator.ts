@@ -78,6 +78,8 @@ export const useLoadingIndicator = ({
     retryStatus === prevRetryStatus ||
     (retryStatus !== null &&
       prevRetryStatus !== null &&
+      retryStatus.role === prevRetryStatus.role &&
+      retryStatus.promptId === prevRetryStatus.promptId &&
       retryStatus.attempt === prevRetryStatus.attempt &&
       retryStatus.delayMs === prevRetryStatus.delayMs &&
       retryStatus.model === prevRetryStatus.model &&

@@ -49,6 +49,7 @@ import {
   debugLogger,
   coreEvents,
   CoreEvent,
+  LlmRole,
   SHELL_TOOL_NAME,
   MCPDiscoveryState,
   GeminiCliOperation,
@@ -2573,10 +2574,170 @@ describe('useGeminiStream', () => {
   });
 
   describe('Retry Handling', () => {
+    const ownedRetry = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
+      model: 'gemini-2.5-pro',
+      attempt: 2,
+      maxAttempts: 10,
+      delayMs: 1000,
+    };
+
+    it.each([
+      [LlmRole.UTILITY_LOOP_DETECTOR, 'active-prompt'],
+      [LlmRole.SUBAGENT, 'active-prompt'],
+      [LlmRole.MAIN, 'previous-prompt'],
+    ])(
+      'ignores %s retries owned by %s while the main stream runs',
+      async (role, promptId) => {
+        const { result } = await renderTestHook();
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerGeminiEventType.Content, value: 'Working' };
+            await new Promise(() => {});
+          })(),
+        );
+        await act(async () => {
+          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+          result.current.submitQuery(
+            'test query',
+            undefined,
+            ownedRetry.promptId,
+          );
+        });
+        await act(async () => {
+          coreEvents.emitRetryAttempt({ ...ownedRetry, role, promptId });
+        });
+        expect(result.current.retryStatus).toBeNull();
+        await act(async () => {
+          coreEvents.emitRetryAttempt(ownedRetry);
+        });
+        expect(result.current.retryStatus).toEqual(ownedRetry);
+        await act(async () => {
+          coreEvents.emitRetryAttempt({
+            ...ownedRetry,
+            role,
+            promptId,
+            maxAttempts: 2,
+          });
+        });
+        expect(result.current.retryStatus).toEqual(ownedRetry);
+        await act(async () => {
+          await result.current.cancelOngoingRequest();
+        });
+      },
+    );
+
+    it.each([
+      {
+        type: ServerGeminiEventType.Thought,
+        value: { subject: 'Planning', description: 'Continuing' },
+      },
+      {
+        type: ServerGeminiEventType.ToolCallRequest,
+        value: { callId: 'working-tool', name: 'read_file', args: {} },
+      },
+      { type: ServerGeminiEventType.ModelInfo, value: 'gemini-2.5-flash' },
+      {
+        type: ServerGeminiEventType.Finished,
+        value: { reason: 'STOP', usageMetadata: undefined },
+      },
+    ])(
+      'clears retry status on successful $type activity without text',
+      async (event) => {
+        const { result } = await renderTestHook();
+        let proceed!: () => void;
+        const ready = new Promise<void>((resolve) => {
+          proceed = resolve;
+        });
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerGeminiEventType.Content, value: 'Started' };
+            await ready;
+            yield event;
+            await new Promise(() => {});
+          })(),
+        );
+        await act(async () => {
+          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+          result.current.submitQuery(
+            'test query',
+            undefined,
+            ownedRetry.promptId,
+          );
+        });
+        await act(async () => {
+          coreEvents.emitRetryAttempt(ownedRetry);
+        });
+        expect(result.current.retryStatus).toEqual(ownedRetry);
+        await act(async () => {
+          proceed();
+        });
+        await waitFor(() => {
+          expect(result.current.retryStatus).toBeNull();
+        });
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        await act(async () => {
+          await result.current.cancelOngoingRequest();
+        });
+      },
+    );
+
+    it('ignores late retries from a finished prompt while the next prompt is active', async () => {
+      const { result } = await renderTestHook();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'First response',
+          };
+        })(),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'first query',
+          undefined,
+          'first-prompt',
+        );
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Second response',
+          };
+          await new Promise(() => {});
+        })(),
+      );
+      await act(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        result.current.submitQuery('second query', undefined, 'second-prompt');
+      });
+      const currentRetry = { ...ownedRetry, promptId: 'second-prompt' };
+      await act(async () => {
+        coreEvents.emitRetryAttempt(currentRetry);
+      });
+      expect(result.current.retryStatus).toEqual(currentRetry);
+      await act(async () => {
+        coreEvents.emitRetryAttempt({
+          ...ownedRetry,
+          promptId: 'first-prompt',
+          maxAttempts: 2,
+        });
+      });
+      expect(result.current.retryStatus).toEqual(currentRetry);
+      await act(async () => {
+        await result.current.cancelOngoingRequest();
+      });
+    });
+
     it('should ignore retryStatus updates when not responding', async () => {
       const { result } = await renderHookWithDefaults();
 
       const retryPayload = {
+        role: LlmRole.MAIN,
+        promptId: 'retry-test-prompt',
         model: 'gemini-2.5-pro',
         attempt: 2,
         maxAttempts: 3,
@@ -2594,6 +2755,8 @@ describe('useGeminiStream', () => {
       const { result } = await renderTestHook();
 
       const retryPayload = {
+        role: LlmRole.MAIN,
+        promptId: 'retry-test-prompt',
         model: 'gemini-2.5-pro',
         attempt: 2,
         maxAttempts: 3,
@@ -2609,7 +2772,11 @@ describe('useGeminiStream', () => {
 
       await act(async () => {
         // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        result.current.submitQuery('test query');
+        result.current.submitQuery(
+          'test query',
+          undefined,
+          'retry-test-prompt',
+        );
       });
 
       await waitFor(() => {
@@ -2634,12 +2801,16 @@ describe('useGeminiStream', () => {
     it('should ignore late retry events after cancellation', async () => {
       const { result } = await renderTestHook();
       const retryPayload = {
+        role: LlmRole.MAIN,
+        promptId: 'retry-test-prompt',
         model: 'gemini-2.5-pro',
         attempt: 2,
         maxAttempts: 3,
         delayMs: 1000,
       };
       const lateRetryPayload = {
+        role: LlmRole.MAIN,
+        promptId: 'retry-test-prompt',
         model: 'gemini-2.5-pro',
         attempt: 3,
         maxAttempts: 3,
@@ -2654,7 +2825,11 @@ describe('useGeminiStream', () => {
 
       await act(async () => {
         // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        result.current.submitQuery('test query');
+        result.current.submitQuery(
+          'test query',
+          undefined,
+          'retry-test-prompt',
+        );
       });
 
       await waitFor(() => {

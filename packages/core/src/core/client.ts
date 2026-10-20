@@ -1107,6 +1107,7 @@ export class GeminiClient {
     abortSignal: AbortSignal,
     role: LlmRole,
   ): Promise<GenerateContentResponse> {
+    const promptId = this.lastPromptId;
     const desiredModelConfig =
       this.config.modelConfigService.getResolvedConfig(modelConfigKey);
     let {
@@ -1179,7 +1180,7 @@ export class GeminiClient {
             config: requestConfig,
             contents,
           },
-          this.lastPromptId,
+          promptId,
           role,
         );
       };
@@ -1219,9 +1220,13 @@ export class GeminiClient {
         getAvailabilityContext,
         onRetry: (attempt, error, delayMs) => {
           coreEvents.emitRetryAttempt({
+            role,
+            promptId,
             attempt,
             maxAttempts:
-              availabilityMaxAttempts ?? this.config.getMaxAttempts(),
+              getAvailabilityContext()?.policy.maxAttempts ??
+              availabilityMaxAttempts ??
+              this.config.getMaxAttempts(),
             delayMs,
             error: error instanceof Error ? error.message : String(error),
             model: getDisplayString(currentAttemptModel),

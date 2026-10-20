@@ -52,6 +52,7 @@ import * as policyHelpers from '../availability/policyHelpers.js';
 import { makeResolvedModelConfig } from '../services/modelConfigServiceTestUtils.js';
 import type { HookSystem } from '../hooks/hookSystem.js';
 import { LlmRole } from '../telemetry/types.js';
+import { coreEvents } from '../utils/events.js';
 import { BINARY_INJECTION_KEY } from '../utils/generateContentResponseUtilities.js';
 import type { ResumedSessionData } from '../services/chatRecordingTypes.js';
 
@@ -4242,6 +4243,84 @@ describe('GeminiChat', () => {
         'model-a',
         expect.anything(),
         error,
+      );
+    });
+
+    it('reports the current model policy budget after a model switch during connection retries', async () => {
+      const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+      vi.spyOn(policyHelpers, 'applyModelSelection').mockReturnValue({
+        model: 'model-a',
+        config: {},
+        maxAttempts: 3,
+      });
+      vi.spyOn(
+        policyHelpers,
+        'createAvailabilityContextProvider',
+      ).mockImplementation((_config, getModel) => () => ({
+        service: mockAvailabilityService,
+        policy: {
+          model: getModel(),
+          maxAttempts: getModel() === 'model-a' ? 3 : 10,
+          actions: {},
+          stateTransitions: {},
+        },
+      }));
+      vi.mocked(
+        mockConfig.modelConfigService.getResolvedConfig,
+      ).mockImplementation((key) =>
+        makeResolvedModelConfig(
+          key.model === 'model-b' ? 'model-b' : 'model-a',
+        ),
+      );
+      const firstError = new Error('model-a connection interrupted');
+      const secondError = new Error('model-b connection interrupted');
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(firstError)
+        .mockRejectedValueOnce(secondError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [{ text: 'Recovered' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        await expect(apiCall()).rejects.toBe(firstError);
+        mockConfig.setActiveModel('model-b');
+        await expect(apiCall()).rejects.toBe(secondError);
+        options?.onRetry?.(1, secondError, 1000);
+        return apiCall();
+      });
+      const stream = await chat.sendMessageStream(
+        { model: 'gemini-pro' },
+        'test',
+        'dynamic-budget-prompt',
+        new AbortController().signal,
+        LlmRole.SUBAGENT,
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+      expect(mockRetryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ maxAttempts: 3 }),
+      );
+      expect(emitRetry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: LlmRole.SUBAGENT,
+          promptId: 'dynamic-budget-prompt',
+          model: 'model-b',
+          maxAttempts: 10,
+          attempt: 1,
+        }),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        3,
       );
     });
 

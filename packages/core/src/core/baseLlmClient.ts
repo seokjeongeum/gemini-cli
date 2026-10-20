@@ -390,6 +390,8 @@ export class BaseLlmClient {
           const errorType = getRetryErrorType(error);
 
           coreEvents.emitRetryAttempt({
+            role,
+            promptId,
             attempt,
             maxAttempts: actualMaxAttempts,
             delayMs,

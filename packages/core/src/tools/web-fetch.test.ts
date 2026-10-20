@@ -32,6 +32,9 @@ import {
   WebFetchFallbackAttemptEvent,
 } from '../telemetry/index.js';
 import { convert } from 'html-to-text';
+import { coreEvents } from '../utils/events.js';
+import { LlmRole } from '../telemetry/llmRole.js';
+import * as retryUtils from '../utils/retry.js';
 
 const mockGenerateContent = vi.fn();
 const mockGetGeminiClient = vi.fn(() => ({
@@ -44,6 +47,8 @@ vi.mock('html-to-text', () => ({
 
 vi.mock('../telemetry/index.js', () => ({
   logWebFetchFallbackAttempt: vi.fn(),
+  logNetworkRetryAttempt: vi.fn(),
+  NetworkRetryAttemptEvent: vi.fn(),
   WebFetchFallbackAttemptEvent: vi.fn((reason) => ({ reason })),
 }));
 
@@ -295,6 +300,37 @@ describe('WebFetchTool', () => {
       isInteractive: () => false,
       isContextManagementEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
+  });
+
+  it('attributes direct fetch retries to the utility tool request', async () => {
+    const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+    const retry = vi
+      .spyOn(retryUtils, 'retryWithBackoff')
+      .mockImplementationOnce(async (apiCall, options) => {
+        options?.onRetry?.(1, new Error('temporary connection failure'), 100);
+        return apiCall();
+      });
+    Object.defineProperty(mockConfig, 'promptId', { value: 'web-fetch-owner' });
+    vi.mocked(mockConfig.getDirectWebFetch).mockReturnValue(true);
+    vi.mocked(fetchUtils.fetchWithTimeout).mockResolvedValueOnce(
+      new Response('Ready', { headers: { 'content-type': 'text/plain' } }),
+    );
+    try {
+      await new WebFetchTool(mockConfig, bus)
+        .build({ url: 'https://example.com/ownership' })
+        .execute({ abortSignal: new AbortController().signal });
+      expect(emitRetry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: LlmRole.UTILITY_TOOL,
+          promptId: 'web-fetch-owner',
+          model: 'Web Fetch',
+          attempt: 1,
+        }),
+      );
+    } finally {
+      emitRetry.mockRestore();
+      retry.mockRestore();
+    }
   });
 
   describe('validateToolParamValues', () => {

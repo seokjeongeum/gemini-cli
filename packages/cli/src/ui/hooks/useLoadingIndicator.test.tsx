@@ -15,7 +15,7 @@ import {
 } from './usePhraseCycler.js';
 import { WITTY_LOADING_PHRASES } from '../constants/wittyPhrases.js';
 import { INFORMATIVE_TIPS } from '../constants/tips.js';
-import type { RetryAttemptPayload } from '@google/gemini-cli-core';
+import { LlmRole, type RetryAttemptPayload } from '@google/gemini-cli-core';
 
 describe('useLoadingIndicator', () => {
   beforeEach(() => {
@@ -233,6 +233,8 @@ describe('useLoadingIndicator', () => {
 
   it('should reflect retry status in currentLoadingPhrase when provided', async () => {
     const retryStatus = {
+      role: LlmRole.MAIN,
+      promptId: 'loading-indicator-prompt',
       model: 'gemini-pro',
       attempt: 2,
       maxAttempts: 3,
@@ -253,6 +255,8 @@ describe('useLoadingIndicator', () => {
 
   it('should not show retry status phrase when idle', async () => {
     const retryStatus = {
+      role: LlmRole.MAIN,
+      promptId: 'loading-indicator-prompt',
       model: 'gemini-pro',
       attempt: 2,
       maxAttempts: 3,
@@ -270,6 +274,8 @@ describe('useLoadingIndicator', () => {
 
   it('should hide low-verbosity retry status for early retry attempts', async () => {
     const retryStatus = {
+      role: LlmRole.MAIN,
+      promptId: 'loading-indicator-prompt',
       model: 'gemini-pro',
       attempt: 1,
       maxAttempts: 5,
@@ -291,6 +297,8 @@ describe('useLoadingIndicator', () => {
 
   it('should show a generic retry phrase in low error verbosity mode for later retries', async () => {
     const retryStatus = {
+      role: LlmRole.MAIN,
+      promptId: 'loading-indicator-prompt',
       model: 'gemini-pro',
       attempt: 2,
       maxAttempts: 5,

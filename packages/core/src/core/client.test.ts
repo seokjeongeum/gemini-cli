@@ -52,6 +52,7 @@ import * as policyCatalog from '../availability/policyCatalog.js';
 import { LlmRole, LoopType } from '../telemetry/types.js';
 import { partToString } from '../utils/partUtils.js';
 import { coreEvents, CoreEvent } from '../utils/events.js';
+import * as retryUtils from '../utils/retry.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -3196,6 +3197,71 @@ ${JSON.stringify(
   });
 
   describe('generateContent', () => {
+    it.each([LlmRole.MAIN, LlmRole.UTILITY_COMPRESSOR])(
+      'attributes %s generation retries to their request',
+      async (role) => {
+        const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+        vi.spyOn(retryUtils, 'retryWithBackoff').mockImplementationOnce(
+          async (apiCall, options) => {
+            options?.onRetry?.(
+              1,
+              new Error('temporary connection failure'),
+              100,
+            );
+            return apiCall();
+          },
+        );
+        await client.generateContent(
+          { model: 'test-model' },
+          [{ role: 'user', parts: [{ text: 'test' }] }],
+          new AbortController().signal,
+          role,
+        );
+        expect(emitRetry).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role,
+            promptId: 'test-session-id',
+            attempt: 1,
+          }),
+        );
+      },
+    );
+
+    it.each([LlmRole.MAIN, LlmRole.UTILITY_COMPRESSOR])(
+      'keeps %s retries and API calls owned by the original prompt',
+      async (role) => {
+        const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+        vi.spyOn(retryUtils, 'retryWithBackoff').mockImplementationOnce(
+          async (apiCall, options) => {
+            await apiCall();
+            client['lastPromptId'] = 'next-prompt';
+            options?.onRetry?.(1, new Error('temporary failure'), 100);
+            return apiCall();
+          },
+        );
+
+        await client.generateContent(
+          { model: 'test-model' },
+          [{ role: 'user', parts: [{ text: 'test' }] }],
+          new AbortController().signal,
+          role,
+        );
+
+        expect(mockContentGenerator.generateContent).toHaveBeenCalledTimes(2);
+        for (const call of vi.mocked(mockContentGenerator.generateContent).mock
+          .calls) {
+          expect(call[1]).toBe('test-session-id');
+          expect(call[2]).toBe(role);
+        }
+        expect(emitRetry).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role,
+            promptId: 'test-session-id',
+          }),
+        );
+      },
+    );
+
     it('should call generateContent with the correct parameters', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;

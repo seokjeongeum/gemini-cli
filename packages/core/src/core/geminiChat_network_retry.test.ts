@@ -13,6 +13,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { createMockMessageBus } from '../test-utils/mock-message-bus.js';
 import { createAvailabilityServiceMock } from '../availability/testUtils.js';
+import { coreEvents } from '../utils/events.js';
 import { LlmRole } from '../telemetry/types.js';
 
 // Mock fs module
@@ -143,78 +144,92 @@ describe('GeminiChat Network Retries', () => {
     vi.restoreAllMocks();
   });
 
-  it('should retry when a 503 ApiError occurs during stream iteration', async () => {
-    // 1. Mock the API to yield one chunk, then throw a 503 error.
-    const error503 = new ApiError({
-      message: 'Service Unavailable',
-      status: 503,
-    });
+  it.each([LlmRole.MAIN, LlmRole.SUBAGENT])(
+    'attributes %s retries when a 503 occurs during stream iteration',
+    async (role) => {
+      const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+      // 1. Mock the API to yield one chunk, then throw a 503 error.
+      const error503 = new ApiError({
+        message: 'Service Unavailable',
+        status: 503,
+      });
 
-    vi.mocked(mockContentGenerator.generateContentStream)
-      .mockImplementationOnce(async () =>
-        (async function* () {
-          yield {
-            candidates: [{ content: { parts: [{ text: 'First part' }] } }],
-          } as unknown as GenerateContentResponse;
-          throw error503;
-        })(),
-      )
-      .mockImplementationOnce(async () =>
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: { parts: [{ text: 'Retry success' }] },
-                finishReason: 'STOP',
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-        })(),
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [{ content: { parts: [{ text: 'First part' }] } }],
+            } as unknown as GenerateContentResponse;
+            throw error503;
+          })(),
+        )
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Retry success' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      // 2. Execute sendMessageStream
+      const stream = await chat.sendMessageStream(
+        { model: 'test-model' },
+        'test message',
+        'prompt-id-retry-network',
+        new AbortController().signal,
+        role,
       );
 
-    // 2. Execute sendMessageStream
-    const stream = await chat.sendMessageStream(
-      { model: 'test-model' },
-      'test message',
-      'prompt-id-retry-network',
-      new AbortController().signal,
-      LlmRole.MAIN,
-    );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
 
-    const events: StreamEvent[] = [];
-    for await (const event of stream) {
-      events.push(event);
-    }
+      // 3. Assertions
+      // Expected sequence: CHUNK('First part') -> RETRY -> CHUNK('Retry success')
+      expect(events.length).toBeGreaterThanOrEqual(3);
 
-    // 3. Assertions
-    // Expected sequence: CHUNK('First part') -> RETRY -> CHUNK('Retry success')
-    expect(events.length).toBeGreaterThanOrEqual(3);
+      const firstChunk = events.find(
+        (e) =>
+          e.type === StreamEventType.CHUNK &&
+          e.value.candidates?.[0]?.content?.parts?.[0]?.text === 'First part',
+      );
+      expect(firstChunk).toBeDefined();
 
-    const firstChunk = events.find(
-      (e) =>
-        e.type === StreamEventType.CHUNK &&
-        e.value.candidates?.[0]?.content?.parts?.[0]?.text === 'First part',
-    );
-    expect(firstChunk).toBeDefined();
+      const retryEvent = events.find((e) => e.type === StreamEventType.RETRY);
+      expect(retryEvent).toBeDefined();
 
-    const retryEvent = events.find((e) => e.type === StreamEventType.RETRY);
-    expect(retryEvent).toBeDefined();
+      const successChunk = events.find(
+        (e) =>
+          e.type === StreamEventType.CHUNK &&
+          e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+            'Retry success',
+      );
+      expect(successChunk).toBeDefined();
 
-    const successChunk = events.find(
-      (e) =>
-        e.type === StreamEventType.CHUNK &&
-        e.value.candidates?.[0]?.content?.parts?.[0]?.text === 'Retry success',
-    );
-    expect(successChunk).toBeDefined();
+      expect(emitRetry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role,
+          promptId: 'prompt-id-retry-network',
+          maxAttempts: 4,
+        }),
+      );
+      emitRetry.mockRestore();
 
-    // Verify retry logging
-    expect(mockLogNetworkRetryAttempt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        error_type: 'SERVER_ERROR',
-      }),
-    );
-  });
+      // Verify retry logging
+      expect(mockLogNetworkRetryAttempt).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error_type: 'SERVER_ERROR',
+        }),
+      );
+    },
+  );
 
   it('should retry on generic network error if retryFetchErrors is true', async () => {
     vi.mocked(mockConfig.getRetryFetchErrors).mockReturnValue(true);

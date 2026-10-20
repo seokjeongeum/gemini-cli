@@ -12,7 +12,7 @@ import {
   isRateLimitRetry,
 } from './useLoadingIndicator.js';
 import { StreamingState } from '../types.js';
-import type { RetryAttemptPayload } from '@google/gemini-cli-core';
+import { LlmRole, type RetryAttemptPayload } from '@google/gemini-cli-core';
 
 describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () => {
   beforeEach(() => {
@@ -98,6 +98,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
   it('Case 1: 429 Rate Limit in default low verbosity - surfaces on Attempt 1 with countdown', async () => {
     const rateLimitRetryStatus: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -151,6 +153,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
   it('Case 2: 429 Rate Limit in full verbosity - displays countdown and attempt details', async () => {
     const rateLimitRetryStatus: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -178,6 +182,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
   it('Case 3: Multi-attempt progression - resets countdown cleanly on next attempt', async () => {
     const attempt1Status: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -204,6 +210,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
     // Attempt 2 arrives with a larger backoff of 6s
     const attempt2Status: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 2,
       maxAttempts: 3,
@@ -228,8 +236,49 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
     );
   });
 
+  it.each([
+    { role: LlmRole.MAIN, promptId: 'next-prompt' },
+    { role: LlmRole.SUBAGENT, promptId: 'active-prompt' },
+  ])(
+    'restarts the countdown when ownership changes to $role/$promptId',
+    async (owner) => {
+      const retryStatus: RetryAttemptPayload = {
+        role: LlmRole.MAIN,
+        promptId: 'active-prompt',
+        model: 'gemini-2.5-flash',
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 5000,
+        error: 'RESOURCE_EXHAUSTED',
+        status: 429,
+      };
+      const { result, rerender } =
+        await renderLoadingIndicatorHook(retryStatus);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(result.current.statusPhrase).toContain('Retrying in 3s');
+
+      await act(async () => {
+        await rerender({ retryStatus: { ...retryStatus } });
+      });
+      expect(result.current.statusPhrase).toContain('Retrying in 3s');
+
+      await act(async () => {
+        await rerender({ retryStatus: { ...retryStatus, ...owner } });
+      });
+      expect(result.current.statusPhrase).toContain('Retrying in 5s');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(result.current.statusPhrase).toContain('Retrying in 4s');
+    },
+  );
+
   it('Case 4: Non-rate-limit errors (e.g. 500 SERVER_ERROR) - preserves standard behavior', async () => {
     const serverErrorStatus: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -268,6 +317,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
   it('Case 5: Manual abort / cancellation during backoff - stops timer and clears phrases', async () => {
     const rateLimitRetryStatus: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -300,6 +351,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
 
   it('Case 6: Pause updates toggle - pauses countdown and resumes without skipping time', async () => {
     const rateLimitRetryStatus: RetryAttemptPayload = {
+      role: LlmRole.MAIN,
+      promptId: 'active-prompt',
       model: 'gemini-2.5-flash',
       attempt: 1,
       maxAttempts: 3,
@@ -345,6 +398,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
     it('should detect rate limits by status code 429', () => {
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,
@@ -357,6 +412,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
     it('should detect rate limits by error keywords', () => {
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,
@@ -366,6 +423,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
       ).toBe(true);
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,
@@ -375,6 +434,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
       ).toBe(true);
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,
@@ -388,6 +449,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
       expect(isRateLimitRetry(null)).toBe(false);
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,
@@ -398,6 +461,8 @@ describe('useLoadingIndicator - 429 Rate Limit and Cool-Down Countdown UX', () =
       ).toBe(false);
       expect(
         isRateLimitRetry({
+          role: LlmRole.MAIN,
+          promptId: 'active-prompt',
           model: 'm',
           attempt: 1,
           maxAttempts: 3,

@@ -35,6 +35,7 @@ import {
   ValidationRequiredError,
   coreEvents,
   CoreEvent,
+  LlmRole,
   CoreToolCallStatus,
   buildUserSteeringHintPrompt,
   GeminiCliOperation,
@@ -297,7 +298,12 @@ export const useGeminiStream = (
 
   useEffect(() => {
     const handleRetryAttempt = (payload: RetryAttemptPayload) => {
-      if (turnCancelledRef.current || !isRespondingRef.current) {
+      if (
+        turnCancelledRef.current ||
+        !isRespondingRef.current ||
+        payload.role !== LlmRole.MAIN ||
+        payload.promptId !== lastPromptIdRef.current
+      ) {
         return;
       }
       setRetryStatus(payload);
@@ -1681,6 +1687,7 @@ export const useGeminiStream = (
 
         switch (event.type) {
           case ServerGeminiEventType.Thought:
+            setRetryStatus(null);
             setLastGeminiActivityTime(Date.now());
             handleThoughtEvent(event.value, userMessageTimestamp);
             break;
@@ -1693,6 +1700,7 @@ export const useGeminiStream = (
             );
             break;
           case ServerGeminiEventType.ToolCallRequest:
+            setRetryStatus(null);
             toolCallRequests.push(event.value);
             pendingToolCallRequestsRef.current.push(event.value);
             break;
@@ -1741,12 +1749,14 @@ export const useGeminiStream = (
             );
             break;
           case ServerGeminiEventType.Finished:
+            setRetryStatus(null);
             handleFinishedEvent(event, userMessageTimestamp);
             break;
           case ServerGeminiEventType.Citation:
             handleCitationEvent(event.value, userMessageTimestamp);
             break;
           case ServerGeminiEventType.ModelInfo:
+            setRetryStatus(null);
             handleChatModelEvent(event.value, userMessageTimestamp);
             break;
           case ServerGeminiEventType.LoopDetected:

@@ -25,6 +25,7 @@ import type { ModelAvailabilityService } from '../availability/modelAvailability
 import { createAvailabilityServiceMock } from '../availability/testUtils.js';
 import type { GenerateContentResponse } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { coreEvents } from '../utils/events.js';
 import { reportError } from '../utils/errorReporting.js';
 import { logMalformedJsonResponse } from '../telemetry/loggers.js';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -147,6 +148,34 @@ describe('BaseLlmClient', () => {
   });
 
   describe('generateJson - Success Scenarios', () => {
+    it.each([LlmRole.MAIN, LlmRole.UTILITY_LOOP_DETECTOR, LlmRole.SUBAGENT])(
+      'attributes %s retries to their request',
+      async (role) => {
+        const emitRetry = vi.spyOn(coreEvents, 'emitRetryAttempt');
+        mockGenerateContent.mockResolvedValue(
+          createMockResponse('{"color":"blue"}'),
+        );
+        try {
+          await client.generateJson({
+            ...defaultOptions,
+            role,
+            promptId: 'owned-request',
+          });
+          const options = vi.mocked(retryWithBackoff).mock.calls.at(-1)?.[1];
+          options?.onRetry?.(2, new Error('temporary'), 100);
+          expect(emitRetry).toHaveBeenCalledWith(
+            expect.objectContaining({
+              role,
+              promptId: 'owned-request',
+              attempt: 2,
+            }),
+          );
+        } finally {
+          emitRetry.mockRestore();
+        }
+      },
+    );
+
     it('should call generateContent with correct parameters, defaults, and utilize retry mechanism', async () => {
       const mockResponse = createMockResponse('{"color": "blue"}');
       mockGenerateContent.mockResolvedValue(mockResponse);

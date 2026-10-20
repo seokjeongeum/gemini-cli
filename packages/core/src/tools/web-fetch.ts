@@ -248,6 +248,8 @@ class WebFetchToolInvocation extends BaseToolInvocation<
     const errorType = getRetryErrorType(error);
 
     coreEvents.emitRetryAttempt({
+      role: LlmRole.UTILITY_TOOL,
+      promptId: this.context.promptId,
       attempt,
       maxAttempts,
       delayMs,

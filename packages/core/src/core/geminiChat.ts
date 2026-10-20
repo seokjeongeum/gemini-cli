@@ -783,6 +783,8 @@ export class GeminiChat {
                   );
                 }
                 coreEvents.emitRetryAttempt({
+                  role,
+                  promptId: prompt_id,
                   attempt: attempt + 1,
                   maxAttempts: Math.min(maxAttempts, maxMidStreamAttempts),
                   delayMs,
@@ -1259,9 +1261,13 @@ export class GeminiChat {
       getAvailabilityContext,
       onRetry: (attempt, error, delayMs) => {
         coreEvents.emitRetryAttempt({
+          role,
+          promptId: prompt_id,
           attempt,
           maxAttempts:
-            availabilityMaxAttempts ?? this.context.config.getMaxAttempts(),
+            getAvailabilityContext()?.policy.maxAttempts ??
+            availabilityMaxAttempts ??
+            this.context.config.getMaxAttempts(),
           delayMs,
           error: error instanceof Error ? error.message : String(error),
           model: lastModelToUse,
