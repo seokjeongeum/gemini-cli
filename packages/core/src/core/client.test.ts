@@ -374,7 +374,7 @@ describe('Gemini Client (client.ts)', () => {
       const mask = vi.spyOn(client['toolOutputMaskingService'], 'mask');
 
       for (let round = 0; round < 3; round++) {
-        const turns = client.getChat().getHistoryTurns();
+        const turns = client.getChat().getCanonicalHistoryTurnsSnapshot();
         const newHistory = turns.map((turn) => turn.content);
         newHistory[2] = {
           ...newHistory[2],
@@ -393,11 +393,11 @@ describe('Gemini Client (client.ts)', () => {
           maskedCount: 1,
           tokensSaved: 10,
         });
-        await client['tryMaskToolOutputs'](turns);
+        await client['tryMaskToolOutputs']();
         expect(
           client
             .getChat()
-            .getHistoryTurns()
+            .getCanonicalHistoryTurnsSnapshot()
             .map((turn) => turn.id),
         ).toEqual(history.map((turn) => turn.id));
         expect(client.getHistory()[0].parts![1]).toEqual(image);
@@ -417,13 +417,16 @@ describe('Gemini Client (client.ts)', () => {
 
     it('does not replace history when masking makes no changes', async () => {
       const setHistory = vi.fn();
-      client['chat'] = { setHistory } as unknown as GeminiChat;
+      client['chat'] = {
+        setHistory,
+        getCanonicalHistoryTurnsSnapshot: () => [],
+      } as unknown as GeminiChat;
       vi.spyOn(client['toolOutputMaskingService'], 'mask').mockResolvedValue({
         newHistory: [],
         maskedCount: 0,
         tokensSaved: 0,
       });
-      await client['tryMaskToolOutputs']([]);
+      await client['tryMaskToolOutputs']();
       expect(setHistory).not.toHaveBeenCalled();
     });
   });
@@ -574,7 +577,9 @@ describe('Gemini Client (client.ts)', () => {
       }));
 
       client['chat'] = {
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -598,7 +603,9 @@ describe('Gemini Client (client.ts)', () => {
       compressionStatus = CompressionStatus.COMPRESSED,
     } = {}) {
       const mockOriginalChat: Partial<GeminiChat> = {
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -636,7 +643,9 @@ describe('Gemini Client (client.ts)', () => {
       });
 
       const mockNewChat: Partial<GeminiChat> = {
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1070,7 +1079,9 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1140,7 +1151,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1205,7 +1218,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1289,7 +1304,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1413,7 +1430,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1462,7 +1481,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1514,7 +1535,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1586,7 +1609,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1650,7 +1675,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1717,7 +1744,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1784,7 +1813,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1844,7 +1875,9 @@ ${JSON.stringify(
       // Use the real GeminiChat to manage state and token counts more realistically
       const mockChatCompressed = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(400),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -1863,7 +1896,9 @@ ${JSON.stringify(
 
       const mockChatInitial = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(initialTokenCount),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -2012,7 +2047,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -2092,7 +2129,7 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({
@@ -2319,7 +2356,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -2368,7 +2407,7 @@ ${JSON.stringify(
           setHistory: vi.fn(),
           setTools: vi.fn(),
           // Assume history is not empty for delta checks
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({
@@ -2752,7 +2791,7 @@ ${JSON.stringify(
 
         mockChat = {
           addHistory: vi.fn(),
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({
@@ -3104,7 +3143,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -3148,7 +3189,9 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         setTools: vi.fn(),
-        getHistoryTurns(this: { getHistory?: () => Content[] }): HistoryTurn[] {
+        getCanonicalHistoryTurnsSnapshot(this: {
+          getHistory?: () => Content[];
+        }): HistoryTurn[] {
           return (this.getHistory?.() ?? []).map((content, index) => ({
             id: String(index),
             content,
@@ -3178,7 +3221,7 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({
@@ -3632,7 +3675,7 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({
@@ -3675,7 +3718,7 @@ ${JSON.stringify(
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           setTools: vi.fn(),
-          getHistoryTurns(this: {
+          getCanonicalHistoryTurnsSnapshot(this: {
             getHistory?: () => Content[];
           }): HistoryTurn[] {
             return (this.getHistory?.() ?? []).map((content, index) => ({

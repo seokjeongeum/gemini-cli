@@ -731,7 +731,7 @@ export class GeminiClient {
     const remainingTokenCount =
       tokenLimit(modelForLimitCheck) - this.getChat().getLastPromptTokenCount();
 
-    await this.tryMaskToolOutputs(this.getChat().getHistoryTurns());
+    await this.tryMaskToolOutputs();
 
     // Estimate tokens. For text-only requests, we estimate based on character length.
     // For requests with non-text parts (like images, tools), we use the countTokens API.
@@ -1312,9 +1312,8 @@ export class GeminiClient {
   /**
    * Masks bulky tool outputs to save context window space.
    */
-  private async tryMaskToolOutputs(
-    history: readonly HistoryTurn[],
-  ): Promise<void> {
+  private async tryMaskToolOutputs(): Promise<void> {
+    const history = this.getChat().getCanonicalHistoryTurnsSnapshot();
     const result = await this.toolOutputMaskingService.mask(
       history.map((turn) => turn.content),
       this.config,

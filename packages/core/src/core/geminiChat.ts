@@ -1333,6 +1333,22 @@ export class GeminiChat {
   }
 
   /**
+   * Snapshots canonical turns for copy-on-write updates such as output masking.
+   * Unlike getHistoryTurns, this preserves IDs, ordering, thought-only turns and
+   * adjacent roles. Parts are shared read-only; callers must replace changed
+   * parts rather than mutate them. No mutable owner arrays are exposed.
+   */
+  getCanonicalHistoryTurnsSnapshot(): readonly HistoryTurn[] {
+    return this.agentHistory.map((turn) => ({
+      id: turn.id,
+      content: {
+        ...turn.content,
+        parts: turn.content.parts ? [...turn.content.parts] : undefined,
+      },
+    }));
+  }
+
+  /**
    * Clears the chat history.
    */
   clearHistory(): void {
