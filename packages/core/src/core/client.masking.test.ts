@@ -59,7 +59,7 @@ describe('canonical history output masking', () => {
       getMaxAttempts: () => 1,
       getRequestTimeoutMs: () => undefined,
       getHookSystem: () => undefined,
-      getSessionMemory: () => '',
+      getSessionMemory: () => 'Multibyte context: 한글 🧪',
       getIncludeDirectoryTree: () => false,
       getToolOutputMaskingConfig: async () => ({
         protectionThresholdTokens: 50000,
@@ -219,7 +219,10 @@ describe('canonical history output masking', () => {
       expect(actual.find((turn) => turn.id === 'thought-only')).toEqual(
         expectedHistory.find((turn) => turn.id === 'thought-only'),
       );
-      const appended = fs.readFileSync(filePath, 'utf8').slice(before);
+      const appended = fs
+        .readFileSync(filePath)
+        .subarray(before)
+        .toString('utf8');
       expect(appended).not.toContain(image);
       expect(appended).not.toContain('"removeIds"');
       expect(appended).not.toContain('"orderIds"');
@@ -299,7 +302,10 @@ describe('canonical history output masking', () => {
       role: 'user',
       parts: [{ text: CONTINUE_PROMPT_TEXT }],
     });
-    const appended = fs.readFileSync(filePath, 'utf8').slice(beforeRequest);
+    const appended = fs
+      .readFileSync(filePath)
+      .subarray(beforeRequest)
+      .toString('utf8');
     expect(appended).not.toContain(CONTINUE_PROMPT_TEXT);
     expect(appended).not.toContain('request-only thought');
     expect(appended).not.toContain('request-only model tail');
