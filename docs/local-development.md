@@ -3,6 +3,219 @@
 This guide provides instructions for setting up and using local development
 features for Gemini CLI.
 
+## Profile startup during local testing
+
+Use `npm run start:profile` from a source checkout to record startup timings
+while you test Gemini CLI interactively. The command runs `npm start` with your
+existing authentication, settings, environment, and terminal. Regular
+`npm start` runs don't collect profiles.
+
+Install dependencies and build the checkout before your first run:
+
+```bash
+npm ci
+npm run build
+npm run start:profile
+```
+
+Pass your usual CLI arguments after `--`, for example:
+
+```bash
+npm run start:profile -- --model auto
+```
+
+Test normally, then use `/quit` to exit. The profiler prints the output
+directory when it starts and a timing summary when Gemini CLI exits. Each run
+writes `summary.json` and `process-<pid>.json` files in a separate, ignored
+directory under `.gemini/startup-profiles/`. CLI process snapshots are written
+after `cli_startup` and the observed startup phases finish. If startup exits
+early, the profiler saves any completed phases on exit. Set
+`GEMINI_STARTUP_PROFILE_DIR` to save runs under a different directory.
+
+Use the summary fields to compare runs with the same settings and arguments:
+
+- `launchToCliMainMs`: Time from launching the child `npm start` process until
+  the CLI enters `main()`, including launcher processes and module loading.
+- `preMainMs`: Time from the selected CLI process starting until `main()`.
+- `cliStartupEndMs`: Time from launching the child `npm start` process until the
+  existing `cli_startup` phase ends. This boundary precedes UI rendering; it
+  doesn't measure time to the first visible prompt.
+
+For `check-build-status` and `sandbox-command`, optional `helperDurationMs`
+measures Node process startup through its exit callback, before writing the
+profile. It includes Node and preload startup but excludes profile file writes
+and renames; it isn't an exact timing of the helper's function.
+
+The report lists process starts and named startup phases, including
+authentication when that phase runs. Phases can overlap or contain other phases,
+so don't add their durations to calculate total startup time. Named phases don't
+cover every operation: gaps can include uninstrumented work, process launches,
+and module loading. The profile excludes initialization of the outer
+`npm run start:profile` command.
+
+For work inside `main()`, check `load_partial_config`, `initial_auth`, and
+`load_sandbox_config` before the full configuration and app initialization
+phases. Check `read_startup_warnings`, `collect_startup_warnings`, and
+`resolve_session` for warnings and session resolution. `startup_oauth` records
+Google sign-in setup before rendering when browser launch is suppressed.
+`import_interactive_ui` records the dynamic UI module import after `cli_startup`
+ends; rendering and time to the first visible prompt aren't measured.
+
+Use the nested phases to inspect the first configuration pass and individual
+warning checks:
+
+- Configuration: `detect_worktree`, `check_folder_trust`,
+  `resolve_workspace_policies`, `load_policies`, `detect_pty`, and
+  `construct_config` separate Git worktree detection, folder trust, workspace
+  policy setup, policy loading, native PTY detection, and configuration
+  construction. Compare these phases with `load_partial_config` to inspect work
+  that runs before configuration is reused.
+- Warnings: `home_directory_warning`, `root_directory_warning`,
+  `folder_trust_warning`, and `compatibility_warnings` separate filesystem path
+  resolution, folder trust, and compatibility checks within
+  `collect_startup_warnings`.
+
+Within worktree detection, `worktree_git_toplevel` measures the first Git
+command, `worktree_linked_discovery` measures project-root discovery and the
+worktree layout check, and its nested `worktree_canonicalize_toplevel` phase
+measures that layout check's physical path resolution and comparison.
+`worktree_base_sha` measures the worktree's HEAD lookup when needed.
+`warning_realpath_workspace` and `warning_realpath_home` measure the two
+filesystem requests inside `home_directory_warning`. The root-directory check
+resolves the workspace separately, within `root_directory_warning`.
+
+Profiling adds its own module loading and report-writing overhead. To compare
+launch costs on Windows, run these commands in PowerShell from the same
+checkout:
+
+```powershell
+Measure-Command { npm start -- --version | Out-Host }
+Measure-Command { npm run start:profile -- --version | Out-Host }
+```
+
+Repeat both commands with the same environment to estimate the extra cost of the
+profiling wrapper. These wall-clock measurements include the outer npm commands.
+Running with `--version` measures the version command's launch path rather than
+authenticated interactive startup.
+
+For an interactive startup comparison, omit `--prompt` or `-p`, wait for the
+prompt, and then enter `/quit`. An empty `-p ""` argument can be removed by npm;
+the resulting headless command exits with a missing-input error. That run
+doesn't test interactive startup or model access.
+
+If no completed `cli_startup` phase appears, the summary omits the startup
+fields. This can happen with `--version`, an early exit, an interrupted
+authentication or trust prompt, or a sandboxed CLI process that the profiler
+can't observe. Host process timings can still appear in the report.
+
+The profiler writes timing and process metadata locally. It doesn't record
+prompts, terminal output, command arguments, environment values, or phase
+details, and it doesn't enable telemetry or debugger pauses.
+
+CLI reports also contain up to 64 `startupProcesses` entries for subprocess API
+calls before the `cli_startup` boundary. Each entry contains a fixed API name,
+an executable class (`node`, `git`, `shell`, `rg`, or `other`), and timings:
+
+- `startMs` uses the same launch clock as the startup phases.
+- `callMs` measures synchronous time inside the intercepted API. For async
+  `spawn`, this is the underlying spawn call, excluding outer argument setup.
+  For sync APIs, it includes waiting for the child to finish.
+- `durationMs` extends through the observed close event or startup boundary.
+  `completed: false` means closure wasn't observed before that boundary.
+- `threw` records whether the API call threw, without storing the error.
+
+The opt-in preload restores the process APIs at the startup boundary. It never
+records command arguments, executable paths, environment values, or output.
+Compare call intervals with delayed warning phases: a pending filesystem promise
+can include time when another operation blocks JavaScript callback delivery. Its
+phase duration alone doesn't establish slow filesystem I/O.
+
+### Inspect Windows filesystem and launch costs
+
+If a startup phase is unusually slow, run this diagnostic from PowerShell in the
+checkout. It uses Node built-ins and Git, so you don't need to install or build
+the checkout again:
+
+```powershell
+node scripts/diagnose-windows-startup.js > .gemini/startup-diagnostic.json
+```
+
+The diagnostic compares empty Node launches, the CLI's first Git worktree
+command, and six filesystem methods for the workspace and home directories.
+Filesystem timings run inside one child process to separate them from Node
+launch time. Two rounds reverse probe order to help expose order effects.
+Progress goes to stderr, and the JSON report goes to stdout.
+
+For process probes, `spawnCallMs` measures the public spawn API call, while
+`elapsedMs` includes the observed child lifetime. A long async spawn call can
+block JavaScript even though the child is launched through an async API.
+
+By default, each operation has a 60-second timeout, and the whole diagnostic has
+a five-minute timeout. A timeout stops the filesystem worker and retains partial
+results. Use `--samples`, `--operation-timeout-ms`, or `--total-timeout-ms` to
+adjust these settings. Check individual `status` fields for errors and timeouts;
+`complete` indicates whether all planned samples finished, not whether they
+succeeded.
+
+Timeouts run on JavaScript's event loop. A blocked process-creation call can
+delay their delivery, so the configured timeout isn't a hard wall-clock bound.
+
+The report contains versions, timings, fixed method and target labels, error
+codes, and path-text comparison booleans. It omits path strings, environment
+values, and command output other than Git's version. Different path text can
+refer to the same directory on Windows. The diagnostic changes no settings and
+doesn't identify which system component caused a delay. Compare repeated runs on
+the affected machine before drawing a performance conclusion.
+
+## Profile builds
+
+Use the build profiler to record the normal build and its child Node processes:
+
+```sh
+npm run build:profile
+```
+
+This runs `npm run build` once with the same environment, terminal streams, CI
+mode, sandbox selection, and exit status. It doesn't skip build steps or enable
+additional caching. You don't need to run a separate build first.
+
+The command prints its report directory and writes `summary.json` plus
+`process-<pid>.json` files under an ignored `.gemini/build-profiles/<run>/`
+directory. Set `GEMINI_BUILD_PROFILE_DIR` to select another output location.
+Normal `npm run build` doesn't create reports.
+
+Use these fields to inspect the run:
+
+- `elapsedMs` measures the nested `npm run build` through its exit, including
+  its launch and descendants. It excludes the outer `npm run build:profile`
+  command and profiling wrapper setup.
+- `exitCode` preserves the build result. Check this before comparing timings.
+- `processStartMs` uses a shared launch clock. `nodeBootToExitMs` measures the
+  observed Node lifetime through its exit callback, including initial profiling
+  setup and its initial report write but excluding its final report write.
+- `phases` contains fixed stage names with start times, durations, and an `ok`
+  or `failed` status. Failed or interrupted children can have incomplete data;
+  missing stages don't mean zero work.
+
+Root stages separate metadata generation, core building, workspace discovery,
+parallel or CI builds, and requested dependency installation or sandbox builds.
+Package stages separate TypeScript compilation, browser MCP bundling, asset
+copying, documentation copying, and the build stamp. Process labels also
+identify TypeScript, devtools, VS Code, browser MCP, npm, and workspace runners.
+Other Node children use the fixed `other-node` label. Non-Node tool costs appear
+within their enclosing stages rather than as separate process records.
+
+Parent stages, child lifetimes, and parallel workspaces overlap. Don't sum them
+to calculate total build time. Compare identical successful workloads and note
+that profiling adds a wrapper, preload, and local report I/O.
+
+Reports contain fixed process and package labels, timing metadata, runtime
+versions, and build-mode flags. They omit command arguments, environment values,
+filesystem paths, output, and error text. Each process report retains at most 64
+phases. The summary retains at most 256 processes; `omittedProcessCount`
+identifies additional process reports when the aggregate exceeds that bound. If
+reporting is unavailable, the build still runs normally.
+
 ## Tracing
 
 Gemini CLI uses OpenTelemetry (OTel) to record traces that help you debug agent

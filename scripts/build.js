@@ -21,59 +21,76 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { profileBuildPhase } from './build-profile.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 // npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
-  execSync('npm install', { stdio: 'inherit', cwd: root });
+  profileBuildPhase('install_dependencies', () =>
+    execSync('npm install', { stdio: 'inherit', cwd: root }),
+  );
 }
 
 // build all workspaces/packages
-execSync('npm run generate', { stdio: 'inherit', cwd: root });
+profileBuildPhase('generate_metadata', () =>
+  execSync('npm run generate', { stdio: 'inherit', cwd: root }),
+);
 
 if (process.env.CI) {
   console.log('CI environment detected. Building workspaces sequentially...');
-  execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root });
+  profileBuildPhase('build_all_workspaces', () =>
+    execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root }),
+  );
 } else {
   // Build core first because everyone depends on it
   console.log('Building @google/gemini-cli-core...');
-  execSync('npm run build -w @google/gemini-cli-core', {
-    stdio: 'inherit',
-    cwd: root,
-  });
+  profileBuildPhase('build_core', () =>
+    execSync('npm run build -w @google/gemini-cli-core', {
+      stdio: 'inherit',
+      cwd: root,
+    }),
+  );
 
   // Build the rest in parallel
   console.log('Building other workspaces in parallel...');
   const workspaceInfo = JSON.parse(
-    execSync('npm query .workspace --json', { cwd: root, encoding: 'utf-8' }),
+    profileBuildPhase('query_workspaces', () =>
+      execSync('npm query .workspace --json', { cwd: root, encoding: 'utf-8' }),
+    ),
   );
   const parallelWorkspaces = workspaceInfo
     .map((w) => w.name)
     .filter((name) => name !== '@google/gemini-cli-core');
 
-  execSync(
-    `npx --no-install npm-run-all --parallel ${parallelWorkspaces.map((w) => `"build -w ${w}"`).join(' ')}`,
-    { stdio: 'inherit', cwd: root },
+  profileBuildPhase('build_parallel_workspaces', () =>
+    execSync(
+      `npx --no-install npm-run-all --parallel ${parallelWorkspaces.map((w) => `"build -w ${w}"`).join(' ')}`,
+      { stdio: 'inherit', cwd: root },
+    ),
   );
 }
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above
 try {
-  execSync('node scripts/sandbox_command.js -q', {
-    stdio: 'inherit',
-    cwd: root,
-  });
+  profileBuildPhase('probe_sandbox', () =>
+    execSync('node scripts/sandbox_command.js -q', {
+      stdio: 'inherit',
+      cwd: root,
+    }),
+  );
   if (
     process.env.BUILD_SANDBOX === '1' ||
     process.env.BUILD_SANDBOX === 'true'
   ) {
-    execSync('node scripts/build_sandbox.js -s', {
-      stdio: 'inherit',
-      cwd: root,
-    });
+    profileBuildPhase('build_sandbox', () =>
+      execSync('node scripts/build_sandbox.js -s', {
+        stdio: 'inherit',
+        cwd: root,
+      }),
+    );
   }
 } catch {
   // ignore

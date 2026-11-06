@@ -16,6 +16,7 @@ import {
 import {
   getCompatibilityWarnings,
   WarningPriority,
+  startupProfiler,
 } from '@google/gemini-cli-core';
 
 // Mock os.homedir to control the home directory in tests
@@ -70,6 +71,59 @@ describe('getUserStartupWarnings', () => {
   });
 
   describe('home directory check', () => {
+    it('retains separate directory requests when workspace and home match', async () => {
+      const realpath = vi.spyOn(fs, 'realpath');
+      const start = vi.spyOn(startupProfiler, 'start');
+
+      await getUserStartupWarnings({}, homeDir);
+
+      expect(realpath.mock.calls).toEqual([[homeDir], [homeDir], [homeDir]]);
+      expect(
+        start.mock.calls.filter(([phase]) =>
+          phase.startsWith('warning_realpath_'),
+        ),
+      ).toEqual([['warning_realpath_workspace'], ['warning_realpath_home']]);
+    });
+
+    it('times each home-check filesystem request until it settles', async () => {
+      let rejectWorkspace!: (error: Error) => void;
+      let resolveHome!: (directory: string) => void;
+      const workspaceResult = new Promise<string>((_resolve, reject) => {
+        rejectWorkspace = reject;
+      });
+      const homeResult = new Promise<string>((resolve) => {
+        resolveHome = resolve;
+      });
+      vi.spyOn(fs, 'realpath').mockImplementation((directory) =>
+        directory === testRootDir ? workspaceResult : homeResult,
+      );
+      const phases = new Map<string, ReturnType<typeof vi.fn>>();
+      vi.spyOn(startupProfiler, 'start').mockImplementation((phase) => {
+        const end = vi.fn();
+        phases.set(phase, end);
+        return { end };
+      });
+
+      const result = getUserStartupWarnings({}, testRootDir);
+      const workspaceEnd = phases.get('warning_realpath_workspace');
+      const homeEnd = phases.get('warning_realpath_home');
+      expect(workspaceEnd).not.toHaveBeenCalled();
+      expect(homeEnd).not.toHaveBeenCalled();
+
+      resolveHome(homeDir);
+      await homeResult;
+      expect(homeEnd).toHaveBeenCalledOnce();
+      expect(workspaceEnd).not.toHaveBeenCalled();
+
+      rejectWorkspace(new Error('Cannot resolve workspace'));
+      const warnings = await result;
+      expect(workspaceEnd).toHaveBeenCalledOnce();
+      expect(warnings).toEqual([
+        expect.objectContaining({ id: 'home-directory' }),
+        expect.objectContaining({ id: 'root-directory' }),
+      ]);
+    });
+
     it('should return a warning when running in home directory', async () => {
       const warnings = await getUserStartupWarnings({}, homeDir);
       expect(warnings).toContainEqual(
@@ -194,6 +248,11 @@ describe('getUserStartupWarnings', () => {
 
   describe('folder trust check', () => {
     it('should throw FatalUntrustedWorkspaceError when untrusted in headless mode', async () => {
+      const start = vi
+        .spyOn(startupProfiler, 'start')
+        .mockImplementation(() => ({
+          end: vi.fn(),
+        }));
       const { isHeadlessMode, FatalUntrustedWorkspaceError } = await import(
         '@google/gemini-cli-core'
       );
@@ -208,6 +267,14 @@ describe('getUserStartupWarnings', () => {
       await expect(
         getUserStartupWarnings({}, testRootDir),
       ).rejects.toThrowError(FatalUntrustedWorkspaceError);
+      const trustPhaseIndex = start.mock.calls.findIndex(
+        ([phase]) => phase === 'folder_trust_warning',
+      );
+      const trustPhase = start.mock.results[trustPhaseIndex];
+      expect(trustPhase.type).toBe('return');
+      if (trustPhase.type === 'return') {
+        expect(trustPhase.value?.end).toHaveBeenCalledOnce();
+      }
     });
 
     it('should not return a warning when trusted in headless mode', async () => {

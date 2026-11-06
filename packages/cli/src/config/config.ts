@@ -43,6 +43,7 @@ import {
   getProjectRootForWorktree,
   isGeminiWorktree,
   getSafeGitEnv,
+  startupProfiler,
   type WorktreeSettings,
   type HookDefinition,
   type HookEventName,
@@ -605,8 +606,10 @@ export async function loadCliConfig(
   } = options;
   const debugMode = isDebugMode(argv);
 
+  const worktreeHandle = startupProfiler.start('detect_worktree');
   const worktreeSettings =
     options.worktreeSettings ?? (await resolveWorktreeSettings(cwd));
+  worktreeHandle?.end();
 
   if (argv.sandbox) {
     process.env['GEMINI_SANDBOX'] = 'true';
@@ -616,6 +619,7 @@ export async function loadCliConfig(
 
   const ideMode = settings.ide?.enabled ?? false;
 
+  const folderTrustHandle = startupProfiler.start('check_folder_trust');
   const folderTrust =
     process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true' ||
     process.env['VITEST'] === 'true'
@@ -626,6 +630,7 @@ export async function loadCliConfig(
       prompt: argv.prompt,
       query: argv.query,
     })?.isTrusted ?? false;
+  folderTrustHandle?.end();
 
   // Set the context filename in the server's memory file helpers before loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -836,19 +841,25 @@ export async function loadCliConfig(
     ),
   };
 
+  const workspacePoliciesHandle = startupProfiler.start(
+    'resolve_workspace_policies',
+  );
   const { workspacePoliciesDir, policyUpdateConfirmationRequest } =
     await resolveWorkspacePolicyState({
       cwd,
       trustedFolder,
       interactive,
     });
+  workspacePoliciesHandle?.end();
 
+  const policiesHandle = startupProfiler.start('load_policies');
   const policyEngineConfig = await createPolicyEngineConfig(
     effectiveSettings,
     approvalMode,
     workspacePoliciesDir,
     interactive,
   );
+  policiesHandle?.end();
 
   const defaultModel = GEMINI_MODEL_ALIAS_AUTO;
   const rawModel =
@@ -884,7 +895,9 @@ export async function loadCliConfig(
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
 
+  const ptyHandle = startupProfiler.start('detect_pty');
   const ptyInfo = await getPty();
+  ptyHandle?.end();
 
   const mcpEnabled = settings.admin?.mcp?.enabled ?? true;
   const extensionsEnabled = settings.admin?.extensions?.enabled ?? true;
@@ -967,7 +980,8 @@ export async function loadCliConfig(
     enabled: !!profileSelector,
   };
 
-  return new Config({
+  const constructConfigHandle = startupProfiler.start('construct_config');
+  const config = new Config({
     acpMode: isAcpMode,
     clientName,
     sessionId,
@@ -1134,6 +1148,8 @@ export async function loadCliConfig(
     },
     enableConseca: settings.security?.enableConseca,
   });
+  constructConfigHandle?.end();
+  return config;
 }
 
 function mergeExcludeTools(
@@ -1152,15 +1168,35 @@ async function resolveWorktreeSettings(
 ): Promise<WorktreeSettings | undefined> {
   let worktreePath: string | undefined;
   try {
-    const { stdout } = await execa('git', ['rev-parse', '--show-toplevel'], {
-      cwd,
-      env: getSafeGitEnv(),
-    });
+    const gitToplevelHandle = startupProfiler.start('worktree_git_toplevel');
+    let stdout: string;
+    try {
+      ({ stdout } = await execa('git', ['rev-parse', '--show-toplevel'], {
+        cwd,
+        env: getSafeGitEnv(),
+      }));
+    } finally {
+      gitToplevelHandle?.end();
+    }
     const toplevel = stdout.trim();
-    const projectRoot = await getProjectRootForWorktree(toplevel);
+    const linkedDiscoveryHandle = startupProfiler.start(
+      'worktree_linked_discovery',
+    );
+    try {
+      const projectRoot = await getProjectRootForWorktree(toplevel);
+      const canonicalizeHandle = startupProfiler.start(
+        'worktree_canonicalize_toplevel',
+      );
 
-    if (isGeminiWorktree(toplevel, projectRoot)) {
-      worktreePath = toplevel;
+      try {
+        if (isGeminiWorktree(toplevel, projectRoot)) {
+          worktreePath = toplevel;
+        }
+      } finally {
+        canonicalizeHandle?.end();
+      }
+    } finally {
+      linkedDiscoveryHandle?.end();
     }
   } catch {
     return undefined;
@@ -1171,6 +1207,7 @@ async function resolveWorktreeSettings(
   }
 
   let worktreeBaseSha: string | undefined;
+  const baseShaHandle = startupProfiler.start('worktree_base_sha');
   try {
     const { stdout } = await execa('git', ['rev-parse', 'HEAD'], {
       cwd: worktreePath,
@@ -1181,6 +1218,8 @@ async function resolveWorktreeSettings(
     debugLogger.debug(
       `Failed to resolve worktree base SHA at ${worktreePath}: ${getErrorMessage(e)}`,
     );
+  } finally {
+    baseShaHandle?.end();
   }
 
   if (!worktreeBaseSha) {
